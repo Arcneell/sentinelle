@@ -52,24 +52,30 @@ readable when enlarged.
 
 ## Image enhancement
 
-Low-bitrate CCTV substreams (CIF/360p, blocky, blurry) can be cleaned up in real time
-by the GPU, per camera or globally, with three levels:
+The dominant defect of low-bitrate CCTV substreams is **compression blocking** (DCT
+macroblocks), not low resolution — most substreams are D1 (704×576), which already has
+plenty of pixels. Enhancement is therefore built around **deblocking**, applied in real
+time per camera or globally, with three levels:
 
 | Level | What it does | Cost |
 |-------|--------------|------|
 | Off | Direct rendering (ewa_lanczossharp upscaler) | none |
-| Light | Deblocking (deband) + adaptive sharpening | very low |
-| Super-resolution | **Neural network run as a GPU shader** that reconstructs edges and detail | GPU |
+| Light | Fast deblocking (`pp7`) + contrast-adaptive sharpening | low |
+| Max | Strong deblocking (`spp`) + adaptive sharpening, **+ neural upscale only when the source is genuinely low-res (≤380 px)** | higher |
 
-Super-resolution uses **Anime4K** (bundled, MIT) — the restore CNN removes compression
-artifacts and the upscale CNN reconstructs detail. In single view, if the optional
-**FSRCNNX** engine (better for photographic/CCTV content) has been downloaded via the
-toolbar, it is used instead. Grid tiles use lighter shader variants so many cameras can
-run at once.
+Deblocking (ffmpeg `pp7`/`spp`) removes the compression macroblocks that make the image
+look "pixelated"; a contrast-adaptive sharpen shader (bundled) then crisps edges without
+halos. For genuinely low-resolution sources (CIF/QVGA) the Max level also runs a neural
+upscaler — **Anime4K** (bundled, MIT), or **FSRCNNX** (downloaded on demand, better for
+photographic content) in single view. Grid tiles use lighter variants so many cameras
+can run at once.
 
-Honest limits: super-resolution reconstructs a *plausible* sharper image from what the
-blur/blocks obscure — it does not invent information that was never captured (a plate 4
-pixels wide stays unreadable). On typical CCTV substreams the legibility gain is large.
+This was tuned by measuring the rendered pixels A/B on a real CCTV substream: on D1
+footage, deblocking is what visibly cleans the image, while a neural upscaler alone
+changes little and can even amplify blocks.
+
+Honest limit: enhancement reconstructs a *plausible* cleaner image — it cannot recover
+information that was never captured (a plate 4 pixels wide stays unreadable).
 
 FSRCNNX is GPL-licensed and therefore **not** bundled; it is downloaded on demand into
 the user profile and never redistributed by this repository.
