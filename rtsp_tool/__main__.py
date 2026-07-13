@@ -49,7 +49,14 @@ def main() -> int:
 
     win = MainWindow(config_path)
     win.show()
-    return app.exec()
+    rc = app.exec()
+
+    # ncnn/Vulkan (reconstruction temps réel) plante parfois au démontage du
+    # process — sortie directe pour éviter un faux « crash » à la fermeture
+    from . import neural
+    if neural._net is not None:
+        os._exit(rc)
+    return rc
 
 
 if __name__ == "__main__":

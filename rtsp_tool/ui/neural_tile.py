@@ -149,6 +149,7 @@ class NeuralTile(QFrame):
     def _afficher(self, rgb):
         if self._stopped:
             return
+        rgb = np.ascontiguousarray(rgb)       # défensif : QImage exige du C-contigu
         self._last_rgb = rgb
         h, w, _ = rgb.shape
         img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)

@@ -76,7 +76,9 @@ def _super_resolve(rgb):
         ex.input("data", m)
         _, out = ex.extract("output")
     arr = np.array(out)                       # (3,H,W) float 0..1
-    return np.clip(arr.transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
+    arr = np.clip(arr.transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
+    # C-contigu obligatoire : QImage refuse un buffer à strides transposés
+    return np.ascontiguousarray(arr)
 
 
 class NeuralWorker(threading.Thread):

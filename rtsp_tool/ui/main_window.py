@@ -41,7 +41,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._cfg = AppConfig(path=config_path)
         self._tiles: dict[str, QWidget] = {}       # camera_id -> tuile (vidéo ou photo)
-        self._grid_vue = "grille"                  # qualité courante des tuiles de grille
         self._mono_tile: VideoTile | None = None
         self._grid_dirty = False
         self._page = 0
@@ -455,12 +454,9 @@ class MainWindow(QMainWindow):
         ids = [i for i in ids if self._cfg.camera(i)][:MAX_TILES]
         paused = self._act_pause.isChecked()
 
-        # une seule tuile = plein cadre → qualité « mono » (HD selon le profil)
-        # au lieu du substream, qui serait très pixelisé à cette taille
-        vue = "mono" if len(ids) == 1 else "grille"
-        if vue != self._grid_vue:
-            self._vider_grille()
-            self._grid_vue = vue
+        # la grille reste TOUJOURS en substream (même à une seule caméra) :
+        # le flux principal n'est ouvert qu'en vue mono (double-clic)
+        vue = "grille"
 
         for cam_id in list(self._tiles):
             if cam_id not in ids:
