@@ -77,17 +77,19 @@ changes little and can even amplify blocks.
 Honest limit: enhancement reconstructs a *plausible* cleaner image — it cannot recover
 information that was never captured (a plate 4 pixels wide stays unreadable).
 
-### Real-time AI reconstruction (single view)
+### Real-time AI reconstruction (grid and single view)
 
 The "Temps réel IA" enhancement level runs a **video super-resolution neural network on
-every frame, live**. The stream is decoded by OpenCV, each frame is downscaled (which also
-averages away compression blocks) and rebuilt ×2 by the network (Real-ESRGAN
-`animevideov3`) on the GPU via Vulkan (ncnn), then displayed.
+every frame, live** — in the grid as well as in single view. Each stream is decoded by
+OpenCV, frames are downscaled (which also averages away compression blocks) and rebuilt
+×2 by the network (Real-ESRGAN `animevideov3`) on the GPU via Vulkan (ncnn).
 
 Downscaling before the network is the trick: it removes block noise *and* keeps the frame
-rate real-time (network cost scales with input pixels). Measured on an Intel integrated
-GPU: 320×180→640×360 ≈ 30 fps, 480×270→960×540 ≈ 15 fps. It runs in **single view only**
-(one GPU pipeline at a time); grid tiles fall back to the Max level.
+rate real-time (network cost scales with input pixels). Tiles share one GPU inference
+queue, and each stream keeps only its **latest** decoded frame, so latency stays bounded
+instead of accumulating. Measured on an Intel integrated GPU: ~30 fps of total throughput
+at grid input size — one tile ≈ 30 fps, two tiles ≈ 18 fps each, nine ≈ 3–4 fps each
+(surveillance-grade). Single view uses a larger input (≈15 fps for more detail).
 
 ### AI frame reconstruction (single frame)
 

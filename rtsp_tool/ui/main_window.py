@@ -366,10 +366,13 @@ class MainWindow(QMainWindow):
 
     def _make_tile(self, cam, vue: str):
         niveau = self._enhance_niveau(cam)
-        # reconstruction neuronale temps réel : seulement en vue mono (GPU lourd)
-        if niveau == "rt" and vue == "mono":
+        if niveau == "rt":
+            # reconstruction neuronale temps réel — en grille, entrée réduite
+            # (« fluide ») car les tuiles se partagent le débit du GPU
             from .neural_tile import NeuralTile
-            tile = NeuralTile(cam, vue)
+            from ..neural import CIBLE_DEFAUT
+            tile = NeuralTile(cam, vue,
+                              cible="fluide" if vue == "grille" else CIBLE_DEFAUT)
         elif vue == "grille" and cam.profil == "eco-extreme":
             tile = PhotoTile(cam, vue)
         else:
@@ -386,23 +389,31 @@ class MainWindow(QMainWindow):
         return cam.amelioration if self._enhance_override == "auto" else self._enhance_override
 
     def _enhance_change(self):
+        ancien = self._enhance_override
         self._enhance_override = self._enh_combo.currentData()
         for tile in self._all_video_tiles():
             tile.set_enhance(self._enhance_niveau(tile.camera))
-        # « Temps réel IA » change le TYPE de tuile en mono → reconstruire la vue mono
+        # « Temps réel IA » change le TYPE des tuiles → reconstruire les vues
+        from .neural_tile import NeuralTile
         if self._mono_tile is not None:
-            cam_id = self._mono_tile.camera.id
-            from .neural_tile import NeuralTile
             veut_neural = (self._enhance_niveau(self._mono_tile.camera) == "rt")
             est_neural = isinstance(self._mono_tile, NeuralTile)
             if veut_neural != est_neural:
-                self._set_mono(cam_id)
+                self._set_mono(self._mono_tile.camera.id)
+        if "rt" in (ancien, self._enhance_override) and ancien != self._enhance_override:
+            # grille : les tuiles existantes changent de type → tout recréer
+            self._vider_grille()
+            self._selection_appliquee()
         if self._enhance_override == "rt":
             from ..neural import disponible
             if not disponible():
                 self.statusBar().showMessage(
                     "Temps réel IA : moteur non installé — clic droit sur une tuile → "
                     "« Reconstruire l'image (IA) » pour le télécharger.", 8000)
+            elif len(self._tiles) > 1:
+                self.statusBar().showMessage(
+                    f"IA temps réel sur {len(self._tiles)} tuiles : le débit d'images "
+                    "se partage le GPU (moins de tuiles = plus fluide).", 8000)
 
     def _all_video_tiles(self):
         cibles = ([self._mono_tile] if self._mono_tile is not None

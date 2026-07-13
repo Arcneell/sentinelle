@@ -82,8 +82,12 @@ def _super_resolve(rgb):
 
 
 class NeuralWorker(threading.Thread):
-    """Décode le flux et reconstruit chaque frame. Callbacks sur le thread appelant
-    via des signaux Qt fournis par la tuile (on_frame(ndarray RGB), on_state(str))."""
+    """Décode le flux et reconstruit les frames. Deux threads :
+      - un LECTEUR qui décode en continu et ne garde que la DERNIÈRE image
+        (indispensable quand plusieurs tuiles se partagent le GPU : sans ça,
+        le retard s'accumule — ici la latence reste bornée à ~1 inférence) ;
+      - la boucle SR (ce thread) qui traite toujours l'image la plus fraîche.
+    Callbacks via signaux Qt fournis par la tuile : on_frame(rgb), on_state(str)."""
 
     def __init__(self, url: str, cible: str, on_frame, on_state):
         super().__init__(daemon=True, name="neural")
@@ -92,11 +96,16 @@ class NeuralWorker(threading.Thread):
         self._on_frame = on_frame
         self._on_state = on_state
         self._stop = threading.Event()
+        self._latest = None
+        self._latest_id = 0
+        self._verrou = threading.Lock()
 
     def stop(self):
         self._stop.set()
 
-    def run(self):
+    # ------------------------------------------------------------- lecteur
+
+    def _lire(self):
         import cv2
         echecs = 0
         while not self._stop.is_set():
@@ -109,14 +118,11 @@ class NeuralWorker(threading.Thread):
             if not cap.isOpened():
                 cap.release()
                 echecs += 1
-                if echecs >= 5:
-                    self._on_state("Flux injoignable")
-                    return
+                self._on_state("Flux injoignable — nouvel essai"
+                               if echecs < 5 else "Flux injoignable")
                 self._attendre(min(2 ** echecs, 30))
                 continue
-
             echecs = 0
-            self._on_state("PLAYING")
             vides = 0
             while not self._stop.is_set():
                 ok, frame = cap.read()
@@ -127,18 +133,37 @@ class NeuralWorker(threading.Thread):
                     time.sleep(0.05)
                     continue
                 vides = 0
-                try:
-                    th = self.target_h
-                    tw = int(frame.shape[1] * th / frame.shape[0]) // 2 * 2
-                    small = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
-                    rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-                    out = _super_resolve(rgb)
-                except Exception as e:
-                    logger.warning(f"neural: frame ignorée ({e})")
-                    continue
-                if not self._stop.is_set():
-                    self._on_frame(out)
+                with self._verrou:
+                    self._latest = frame          # écrase : on ne garde que la dernière
+                    self._latest_id += 1
             cap.release()
+
+    # ------------------------------------------------------------ boucle SR
+
+    def run(self):
+        import cv2
+        lecteur = threading.Thread(target=self._lire, daemon=True,
+                                   name="neural-lecteur")
+        lecteur.start()
+        traite = 0
+        while not self._stop.is_set():
+            with self._verrou:
+                frame, fid = self._latest, self._latest_id
+            if frame is None or fid == traite:
+                time.sleep(0.01)
+                continue
+            traite = fid
+            try:
+                th = self.target_h
+                tw = int(frame.shape[1] * th / frame.shape[0]) // 2 * 2
+                small = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
+                rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+                out = _super_resolve(rgb)
+            except Exception as e:
+                logger.warning(f"neural: frame ignorée ({e})")
+                continue
+            if not self._stop.is_set():
+                self._on_frame(out)
 
     def _attendre(self, s):
         fin = time.time() + s
