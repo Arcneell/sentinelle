@@ -50,6 +50,17 @@ Rotation and sequences close the current streams before opening the next ones. R
 over TCP. Substreams are upscaled with mpv's `ewa_lanczossharp` scaler so they stay
 readable when enlarged.
 
+## Substream optimisation (the real fix)
+
+The biggest quality lever is the DVR encoder, not client-side processing. Many Dahua
+DVRs ship their substream as **MJPEG** at a low bitrate — every frame is a standalone,
+heavily-compressed JPEG, which is what produces the blocky look. In Configuration,
+select a Dahua camera or site → **"Optimiser le flux (DVR)"** switches the substream to
+**H.264** at the same bitrate. This transforms the image at the source, with no
+post-processing and no artificial look, and affects neither the main stream nor
+recording. It is the recommended first step; the enhancement levels below are for when
+you cannot change the DVR.
+
 ## Image enhancement
 
 The dominant defect of low-bitrate CCTV substreams is **compression blocking** (DCT

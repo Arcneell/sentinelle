@@ -752,6 +752,9 @@ class ConfigDialog(QDialog):
         btn_edit.clicked.connect(self._modifier)
         btn_del = QPushButton(icon("trash"), " Supprimer")
         btn_del.clicked.connect(self._supprimer)
+        btn_opt = QPushButton(icon("settings"), " Optimiser le flux (DVR)…")
+        btn_opt.setToolTip("Améliore la qualité du sous-flux dans le DVR (Dahua)")
+        btn_opt.clicked.connect(self._optimiser_dvr)
 
         self._rot = QSpinBox()
         self._rot.setRange(3, 3600)
@@ -766,6 +769,7 @@ class ConfigDialog(QDialog):
         droite.addSpacing(16)
         droite.addWidget(btn_edit)
         droite.addWidget(btn_del)
+        droite.addWidget(btn_opt)
         droite.addSpacing(16)
         droite.addWidget(QLabel("Durée de rotation :"))
         droite.addWidget(self._rot)
@@ -862,6 +866,49 @@ class ConfigDialog(QDialog):
             dlg.appliquer()
             self.modifie = True
             self._rafraichir()
+
+    def _optimiser_dvr(self):
+        """Passe le sous-flux du DVR (Dahua) en H.264 pour une image nette."""
+        sel = self._selection()
+        cams = []
+        if sel and sel[0] == "camera":
+            c = self._cfg.camera(sel[1])
+            cams = [c] if c else []
+        elif sel and sel[0] == "site":
+            cams = [c for c in self._cfg.cameras if c.site.id == sel[1]]
+        cams = [c for c in cams if c.marque in ("dahua", "amcrest")]
+        if not cams:
+            QMessageBox.information(
+                self, "Optimiser le flux",
+                "Sélectionnez une caméra (ou un site) Dahua.\n"
+                "Cette optimisation s'applique aux DVR Dahua.")
+            return
+
+        from ..dvr_tune import lire_substream, optimiser_substream
+        etat = lire_substream(cams[0])
+        avant = (f"Actuel : {etat['compression']}, {etat['bitrate']} kbps, "
+                 f"{etat['fps']} i/s, {etat['w']}×{etat['h']}\n\n"
+                 if etat.get("ok") else "")
+        n = len(cams)
+        cible = "cette caméra" if n == 1 else f"les {n} caméras de ce site"
+        if QMessageBox.question(
+                self, "Optimiser le flux",
+                f"{avant}Passer le sous-flux de {cible} en H.264 "
+                f"(1024 kbps, 15 i/s) ?\n\n"
+                "N'affecte ni le flux HD ni l'enregistrement. Réversible depuis "
+                "l'interface web du DVR.") != QMessageBox.Yes:
+            return
+
+        ok, ko = [], []
+        for c in cams:
+            reussi, msg = optimiser_substream(c)
+            (ok if reussi else ko).append(f"{c.nom} : {msg}")
+        txt = ""
+        if ok:
+            txt += f"Optimisées ({len(ok)}) :\n" + "\n".join(ok)
+        if ko:
+            txt += ("\n\n" if txt else "") + f"Échecs ({len(ko)}) :\n" + "\n".join(ko)
+        QMessageBox.information(self, "Optimiser le flux", txt or "Rien à faire.")
 
     def _modifier(self):
         sel = self._selection()
