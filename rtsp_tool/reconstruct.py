@@ -32,11 +32,8 @@ TIMEOUT_S = 300
 
 
 def _tools_dir() -> Path:
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA", os.path.expanduser("~"))
-        return Path(base) / "RTSP-TOOL" / "tools" / "realesrgan"
-    base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-    return Path(base) / "rtsp-tool" / "tools" / "realesrgan"
+    from .config import app_data_dir
+    return Path(app_data_dir()) / "tools" / "realesrgan"
 
 
 def _exe_path() -> Path:

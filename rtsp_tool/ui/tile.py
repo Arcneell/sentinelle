@@ -60,8 +60,8 @@ _DOT_COLORS = {
 
 
 def snapshot_path(camera) -> str:
-    """Chemin horodaté pour une capture manuelle (Images/RTSP-TOOL/)."""
-    dossier = Path.home() / "Pictures" / "RTSP-TOOL"
+    """Chemin horodaté pour une capture manuelle (Images/Sentinelle/)."""
+    dossier = Path.home() / "Pictures" / "Sentinelle"
     dossier.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return str(dossier / f"{camera.id}-{stamp}.jpg")
@@ -246,6 +246,13 @@ class VideoTile(QFrame):
     def mouseDoubleClickEvent(self, event):
         self.double_clicked.emit(self.camera.id)
         event.accept()
+
+    def set_motion(self, actif: bool):
+        couleur = "#e04040" if actif else "#303030"
+        largeur = 3 if actif else 1
+        self.setStyleSheet(
+            f"VideoTile {{ background-color: #101010; "
+            f"border: {largeur}px solid {couleur}; }}")
 
     def contextMenuEvent(self, event):
         from ..enhance import NIVEAU_LABELS

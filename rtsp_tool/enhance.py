@@ -58,13 +58,8 @@ def _bundled_dir() -> Path:
 
 def user_shaders_dir() -> Path:
     """Dossier des shaders ajoutés par l'utilisateur (FSRCNNX téléchargé…)."""
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA", os.path.expanduser("~"))
-        d = Path(base) / "RTSP-TOOL" / "shaders"
-    else:
-        base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-        d = Path(base) / "rtsp-tool" / "shaders"
-    return d
+    from .config import app_data_dir
+    return Path(app_data_dir()) / "shaders"
 
 
 def _find(nom: str) -> str:

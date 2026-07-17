@@ -10,7 +10,7 @@ import logging
 import os
 import sys
 
-from .config import default_config_path
+from .config import default_config_path, migrer_ancien_dossier
 
 
 def main() -> int:
@@ -20,16 +20,18 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
 
-    parser = argparse.ArgumentParser(prog="rtsp-tool",
-                                     description="Visionneuse RTSP multi-sites")
+    parser = argparse.ArgumentParser(prog="sentinelle",
+                                     description="Sentinelle — visionneuse de vidéosurveillance")
     parser.add_argument("--config", "-c", default="",
                         help="chemin du fichier de configuration (défaut : profil utilisateur)")
     args = parser.parse_args()
 
+    migrer_ancien_dossier()          # reprend les données de l'ancien nom si présent
+
     from PySide6.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
-    app.setApplicationName("RTSP-TOOL")
+    app.setApplicationName("Sentinelle")
 
     from .ui.theme import apply_dark_theme
     apply_dark_theme(app)

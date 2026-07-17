@@ -47,7 +47,9 @@ class MainWindow(QMainWindow):
         self._seq = None                            # séquence en cours de lecture
         self._seq_idx = -1
         self._enhance_override = "auto"             # amélioration : override global live
-        self._settings = QSettings("RTSP-TOOL", "viewer")
+        self._motion = None                         # MotionMonitor (ONVIF)
+        self._motion_ids = set()                    # caméras actuellement en mouvement
+        self._settings = QSettings("Sentinelle", "viewer")
 
         self.setWindowTitle(f"{APP_NAME} v{__version__}")
         self.setWindowIcon(app_icon())
@@ -125,6 +127,22 @@ class MainWindow(QMainWindow):
         act_dl.triggered.connect(self._telecharger_fsrcnnx)
         tb.addAction(act_dl)
         self._fsrcnnx_fini.connect(self._on_fsrcnnx_fini)
+        tb.addSeparator()
+
+        # --- détection de mouvement (ONVIF) ---
+        self._act_motion = QAction(icon("motion"), "Mouvement", self)
+        self._act_motion.setCheckable(True)
+        self._act_motion.setToolTip("Surligne en rouge les caméras qui détectent "
+                                    "du mouvement (via ONVIF)")
+        self._act_motion.toggled.connect(self._motion_basculee)
+        tb.addAction(self._act_motion)
+
+        self._act_motion_auto = QAction(icon("grid"), "Vue mouvement", self)
+        self._act_motion_auto.setCheckable(True)
+        self._act_motion_auto.setToolTip("Affiche automatiquement dans la grille "
+                                         "les caméras en mouvement")
+        self._act_motion_auto.toggled.connect(self._motion_auto_basculee)
+        tb.addAction(self._act_motion_auto)
         tb.addSeparator()
 
         self._act_pause = QAction(icon("pause"), "Tout arrêter", self)
@@ -330,7 +348,11 @@ class MainWindow(QMainWindow):
         return CAP_CHOICES[self._cap_combo.currentIndex()][1]
 
     def _pages(self) -> list[list[str]]:
-        ids = self._cameras_cochees()
+        # « Vue mouvement » : la grille suit les caméras en mouvement
+        if self._act_motion_auto.isChecked():
+            ids = [c.id for c in self._cfg.cameras if c.id in self._motion_ids]
+        else:
+            ids = self._cameras_cochees()
         cap = self._cap()
         if not ids:
             return []
@@ -373,6 +395,8 @@ class MainWindow(QMainWindow):
         tile.state_changed.connect(self._update_status)
         tile.snapshot_saved.connect(
             lambda p: self.statusBar().showMessage(f"Image enregistrée : {p}", 6000))
+        if cam.id in self._motion_ids and hasattr(tile, "set_motion"):
+            tile.set_motion(True)
         return tile
 
     def _enhance_niveau(self, cam) -> str:
@@ -485,12 +509,15 @@ class MainWindow(QMainWindow):
 
         ordered = [self._tiles[cid] for cid in ids if cid in self._tiles]
         if not ordered:
-            self._placeholder.setText(
-                "Aucune caméra configurée.\n"
-                "Ouvrez la configuration pour ajouter vos sites et vos DVR."
-                if not self._cfg.cameras else
-                "Cochez des caméras dans le panneau de gauche.\n"
-                "Double-clic : plein écran. Clic droit : options.")
+            if self._act_motion_auto.isChecked():
+                txt = "Vue mouvement active.\nEn attente de mouvement sur une caméra…"
+            elif not self._cfg.cameras:
+                txt = ("Aucune caméra configurée.\n"
+                       "Ouvrez la configuration pour ajouter vos sites et vos DVR.")
+            else:
+                txt = ("Cochez des caméras dans le panneau de gauche.\n"
+                       "Double-clic : plein écran. Clic droit : options.")
+            self._placeholder.setText(txt)
             self._grid_layout.addWidget(self._placeholder, 0, 0)
         else:
             cols = math.ceil(math.sqrt(len(ordered)))
@@ -743,6 +770,58 @@ class MainWindow(QMainWindow):
             else:
                 tile.start()
 
+    # ---------------------------------------------------------- mouvement ONVIF
+
+    def _motion_assurer(self):
+        if self._motion is None:
+            from ..motion import MotionMonitor
+            self._motion = MotionMonitor(self)
+            self._motion.motion_changed.connect(self._on_motion)
+
+    def _motion_basculee(self, actif: bool):
+        if actif:
+            if not self._cfg.cameras:
+                self._act_motion.setChecked(False)
+                return
+            self._motion_assurer()
+            self._motion.surveiller(list(self._cfg.cameras))
+            self.statusBar().showMessage(
+                "Détection de mouvement activée (ONVIF).", 5000)
+        else:
+            if self._act_motion_auto.isChecked():
+                self._act_motion_auto.setChecked(False)
+            if self._motion is not None:
+                self._motion.stop()
+            for cam_id in list(self._motion_ids):
+                self._appliquer_motion(cam_id, False)
+            self._motion_ids.clear()
+
+    def _motion_auto_basculee(self, actif: bool):
+        if actif and not self._act_motion.isChecked():
+            self._act_motion.setChecked(True)       # la vue auto implique la détection
+        if actif:
+            self.statusBar().showMessage(
+                "Vue mouvement : la grille affiche les caméras qui bougent.", 5000)
+        self._selection_appliquee()
+
+    def _on_motion(self, cam_id: str, actif: bool):
+        if actif:
+            self._motion_ids.add(cam_id)
+        else:
+            self._motion_ids.discard(cam_id)
+        self._appliquer_motion(cam_id, actif)
+        if self._act_motion_auto.isChecked():
+            self._selection_appliquee()
+
+    def _appliquer_motion(self, cam_id: str, actif: bool):
+        """Surligne la tuile correspondante si elle est affichée."""
+        tuile = self._tiles.get(cam_id)
+        if tuile is None and self._mono_tile is not None \
+                and self._mono_tile.camera.id == cam_id:
+            tuile = self._mono_tile
+        if tuile is not None and hasattr(tuile, "set_motion"):
+            tuile.set_motion(actif)
+
     def _peupler_menu_ecrans(self, menu: QMenu):
         menu.clear()
         for i, ecran in enumerate(QGuiApplication.screens()):
@@ -793,6 +872,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._seq_timer.stop()
         self._rotation_timer.stop()
+        if self._motion is not None:
+            self._motion.stop()
         if self._save_timer.isActive():
             self._save_timer.stop()
             save_config(self._cfg)

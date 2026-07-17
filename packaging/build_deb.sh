@@ -1,5 +1,5 @@
 #!/bin/bash
-# Construit le paquet .deb de RTSP-TOOL.
+# Construit le paquet .deb de Sentinelle.
 # Usage local (Debian/Ubuntu) :  bash packaging/build_deb.sh
 # Usage via Docker (depuis Windows, à la racine du projet) :
 #   docker run --rm -v "${PWD}:/src" -w /src debian:12 bash packaging/build_deb.sh
@@ -7,7 +7,7 @@ set -euo pipefail
 
 VERSION=$(grep -oP '__version__ = "\K[^"]+' rtsp_tool/__init__.py)
 ARCH=amd64
-PKG=rtsp-tool_${VERSION}_${ARCH}
+PKG=sentinelle_${VERSION}_${ARCH}
 
 # --- dépendances de build (no-op si déjà présentes) ---
 # libpython3.11 : requise par PyInstaller ; libgl1/libegl1/… : requises pour
@@ -22,51 +22,52 @@ fi
 # --- binaire PyInstaller ---
 python3 -m venv /tmp/venv
 /tmp/venv/bin/pip install --quiet -r requirements.txt pyinstaller
-/tmp/venv/bin/pyinstaller --noconfirm --windowed --name rtsp-tool \
+/tmp/venv/bin/pyinstaller --noconfirm --windowed --name sentinelle \
     --add-data "rtsp_tool/shaders:rtsp_tool/shaders" \
+    --add-data "rtsp_tool/ui/sentinelle.png:rtsp_tool/ui" \
     --distpath /tmp/dist --workpath /tmp/build run.py
 
 # --- arborescence du paquet ---
 ROOT=/tmp/${PKG}
 rm -rf "$ROOT"
-mkdir -p "$ROOT/DEBIAN" "$ROOT/opt/rtsp-tool" "$ROOT/usr/bin" \
+mkdir -p "$ROOT/DEBIAN" "$ROOT/opt/sentinelle" "$ROOT/usr/bin" \
          "$ROOT/usr/share/applications" \
          "$ROOT/usr/share/icons/hicolor/256x256/apps" \
          "$ROOT/usr/share/icons/hicolor/scalable/apps"
-cp -r /tmp/dist/rtsp-tool/. "$ROOT/opt/rtsp-tool/"
+cp -r /tmp/dist/sentinelle/. "$ROOT/opt/sentinelle/"
 
 # icône de l'application (PNG 256 + SVG scalable)
-cp packaging/rtsp-tool.png "$ROOT/usr/share/icons/hicolor/256x256/apps/rtsp-tool.png"
-cp packaging/rtsp-tool.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/rtsp-tool.svg"
+cp packaging/sentinelle.png "$ROOT/usr/share/icons/hicolor/256x256/apps/sentinelle.png"
+cp packaging/sentinelle.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/sentinelle.svg"
 
 cat > "$ROOT/DEBIAN/control" <<EOF
-Package: rtsp-tool
+Package: sentinelle
 Version: ${VERSION}
 Section: video
 Priority: optional
 Architecture: ${ARCH}
 Depends: libmpv2 | libmpv1
 Recommends: ffmpeg
-Maintainer: RTSP-TOOL <rtsp-tool@example.com>
-Description: Visionneuse RTSP multi-sites (DVR Hikvision/Dahua)
- Visualisation en grille/mono de cameras RTSP multi-sites,
- avec gestion economique de la bande passante (substream, mode photo 4G),
+Maintainer: Sentinelle <sentinelle@example.com>
+Description: Visionneuse de videosurveillance multi-sites (RTSP, ONVIF)
+ Visualisation en grille/mono de cameras RTSP (Hikvision, Dahua, ONVIF),
+ detection de mouvement ONVIF, gestion economique de la bande passante,
  rotation automatique et boucles configurables.
 EOF
 
-ln -sf /opt/rtsp-tool/rtsp-tool "$ROOT/usr/bin/rtsp-tool"
+ln -sf /opt/sentinelle/sentinelle "$ROOT/usr/bin/sentinelle"
 
-cat > "$ROOT/usr/share/applications/rtsp-tool.desktop" <<EOF
+cat > "$ROOT/usr/share/applications/sentinelle.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=RTSP-TOOL
-GenericName=Visionneuse cameras
-Comment=Visionneuse cameras multi-sites (DVR Hikvision/Dahua)
-Exec=/opt/rtsp-tool/rtsp-tool
-Icon=rtsp-tool
+Name=Sentinelle
+GenericName=Videosurveillance
+Comment=Visionneuse de videosurveillance multi-sites
+Exec=/opt/sentinelle/sentinelle
+Icon=sentinelle
 Terminal=false
 Categories=AudioVideo;Video;
-StartupWMClass=rtsp-tool
+StartupWMClass=sentinelle
 EOF
 
 # rafraîchit le cache des icônes et du menu après (dés)installation

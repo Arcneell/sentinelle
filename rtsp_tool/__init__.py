@@ -1,4 +1,4 @@
-"""RTSP-TOOL — visionneuse multi-sites de flux RTSP (DVR Hikvision/Dahua)."""
+"""Sentinelle — visionneuse de vidéosurveillance multi-sites (RTSP, ONVIF)."""
 
-__version__ = "0.1.0"
-APP_NAME = "RTSP-TOOL"
+__version__ = "1.0.0"
+APP_NAME = "Sentinelle"

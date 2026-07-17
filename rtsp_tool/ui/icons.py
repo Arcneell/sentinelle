@@ -46,6 +46,9 @@ _PATHS = {
     "lock": '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
     "video": '<polygon points="23 7 16 12 23 17 23 7"/>'
              '<rect x="1" y="5" width="15" height="14" rx="2"/>',
+    "motion": '<path d="M13 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/>'
+              '<path d="M8 8l3 2 1 5 3 3"/><path d="M11 10l-2 4-4 1"/>'
+              '<path d="M15 11l4-1"/>',
 }
 
 _FILLED = {"play", "stop", "pause"}
@@ -80,8 +83,8 @@ def icon(name: str, color: str = _DEFAUT) -> QIcon:
 def app_icon() -> QIcon:
     """Icône de l'application (logo dédié, embarqué). Repli sur le glyphe vidéo."""
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
-    for rel in ("ui/rtsp-tool.ico", "ui/rtsp-tool.png",
-                "rtsp_tool/ui/rtsp-tool.ico", "rtsp_tool/ui/rtsp-tool.png"):
+    for rel in ("ui/sentinelle.ico", "ui/sentinelle.png",
+                "rtsp_tool/ui/sentinelle.ico", "rtsp_tool/ui/sentinelle.png"):
         p = base / rel
         if p.is_file():
             ic = QIcon(str(p))

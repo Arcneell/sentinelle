@@ -138,6 +138,11 @@ class PhotoTile(QFrame):
         self.double_clicked.emit(self.camera.id)
         event.accept()
 
+    def set_motion(self, actif: bool):
+        c = "#e04040" if actif else "#303030"
+        w = 3 if actif else 1
+        self.setStyleSheet(f"PhotoTile {{ background-color: #101010; border: {w}px solid {c}; }}")
+
     def contextMenuEvent(self, event):
         from .icons import icon
         menu = QMenu(self)

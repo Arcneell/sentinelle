@@ -5,7 +5,7 @@ Point d'entrée : reconstruire_image(parent, camera, src_png)
   - lance la reconstruction en arrière-plan (5-20 s selon GPU) ;
   - affiche le résultat côte à côte avec l'original, avec l'avertissement
     « détails inventés par l'IA » ;
-  - le résultat est enregistré dans Images/RTSP-TOOL.
+  - le résultat est enregistré dans Images/Sentinelle.
 """
 
 import threading
@@ -85,7 +85,7 @@ def reconstruire_image(parent, camera, src_png: str):
             return
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    dst = str(Path.home() / "Pictures" / "RTSP-TOOL"
+    dst = str(Path.home() / "Pictures" / "Sentinelle"
               / f"{camera.id}-{stamp}-reconstruite.png")
 
     prog = QProgressDialog("Reconstruction en cours…", None, 0, 0, parent)

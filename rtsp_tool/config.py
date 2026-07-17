@@ -93,12 +93,45 @@ LIENS = ("fibre", "4g")
 ENHANCE_NIVEAUX = ("off", "leger", "sr", "max", "rt")   # amélioration d'image (cf. enhance.py)
 
 
-def default_config_path() -> str:
+APP_DIR_WIN = "Sentinelle"
+APP_DIR_NIX = "sentinelle"
+_ANCIENS_WIN = ("RTSP-TOOL",)          # migration depuis l'ancien nom
+_ANCIENS_NIX = ("rtsp-tool",)
+
+
+def app_data_dir() -> str:
+    """Dossier de données de l'application (config, moteurs, shaders)."""
     if sys.platform == "win32":
         base = os.environ.get("APPDATA", os.path.expanduser("~"))
-        return os.path.join(base, "RTSP-TOOL", "config.yaml")
+        return os.path.join(base, APP_DIR_WIN)
     base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-    return os.path.join(base, "rtsp-tool", "config.yaml")
+    return os.path.join(base, APP_DIR_NIX)
+
+
+def migrer_ancien_dossier():
+    """Renomme l'ancien dossier RTSP-TOOL en Sentinelle (une fois)."""
+    nouveau = app_data_dir()
+    if os.path.exists(nouveau):
+        return
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        anciens = _ANCIENS_WIN
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        anciens = _ANCIENS_NIX
+    for a in anciens:
+        chemin = os.path.join(base, a)
+        if os.path.isdir(chemin):
+            try:
+                os.rename(chemin, nouveau)
+                logger.info(f"Données migrées : {chemin} -> {nouveau}")
+            except OSError as e:
+                logger.warning(f"Migration impossible ({e})")
+            return
+
+
+def default_config_path() -> str:
+    return os.path.join(app_data_dir(), "config.yaml")
 
 
 def slugify(nom: str) -> str:
@@ -384,7 +417,7 @@ def save_config(cfg: AppConfig):
     os.makedirs(os.path.dirname(os.path.abspath(cfg.path)), exist_ok=True)
     tmp = cfg.path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        f.write("# RTSP-TOOL — fichier géré par l'application (fenêtre Configuration).\n")
+        f.write("# Sentinelle — fichier géré par l'application (fenêtre Configuration).\n")
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
     os.replace(tmp, cfg.path)
     logger.info(f"Config enregistrée : {cfg.path}")

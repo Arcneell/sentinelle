@@ -1,8 +1,9 @@
-# RTSP-TOOL
+# Sentinelle
 
-Desktop viewer for RTSP streams from IP DVRs and cameras, for Windows and Linux.
-Grid and single-camera views, automatic rotation and configurable sequences, with
-per-camera bandwidth profiles so large grids stay usable over slow links.
+Desktop video-surveillance viewer for RTSP / ONVIF cameras and DVRs, for Windows and
+Linux. Grid and single-camera views, ONVIF motion detection, automatic rotation and
+configurable sequences, with per-camera bandwidth profiles so large grids stay usable
+over slow links.
 
 Works with Hikvision and Dahua natively, several other brands via URL templates, and
 any ONVIF device through auto-discovery.
@@ -14,17 +15,19 @@ any ONVIF device through auto-discovery.
 ## Features
 
 - Grid (up to 4×4) and single-camera views; double-click a tile to switch.
+- **ONVIF motion detection**: tiles with motion are outlined in red, and a
+  **"motion view"** automatically fills the grid with the cameras that are moving.
 - Automatic rotation through grid pages or through cameras.
 - Sequences ("loops"): ordered steps (grid or single view + cameras + duration) played
   on repeat, with a built-in editor.
 - Per-camera bandwidth profiles (see below).
-- **Neural image enhancement** (see below): real-time GPU super-resolution to make
-  low-quality substreams legible.
 - **Wide device support**: Hikvision, Dahua, Amcrest, Reolink, Uniview, Axis, Vivotek,
   Foscam, TP-Link/Tapo via built-in URL templates, plus **ONVIF** for anything else.
 - **ONVIF network discovery**: scan the LAN, pick the cameras, and their stream URLs
   (main + sub), snapshot URL and PTZ capability are resolved automatically.
 - **PTZ control** for motorised ONVIF cameras (pan/tilt/zoom pad in single view).
+- **Substream optimisation** and **image enhancement**, incl. optional real-time neural
+  reconstruction (see below).
 - **Digital zoom** and per-tile aspect mode (fit / crop / stretch); a **"test
   connection"** button when adding a camera.
 - Whole-DVR import: channels and their names are discovered over the Hikvision ISAPI, or
@@ -34,6 +37,17 @@ any ONVIF device through auto-discovery.
 - Snapshot capture, per-tile and total bitrate, multi-monitor full screen, dark theme.
 - Configured entirely in the UI. Passwords are not shown again once set and are
   obfuscated on disk.
+
+## Motion detection (ONVIF)
+
+Toggle **Mouvement** to subscribe to each camera's ONVIF event stream (PullPoint). When
+a camera reports motion, its tile is outlined in red. Toggle **Vue mouvement** and the
+grid stops showing your manual selection and instead shows, live, only the cameras that
+are currently moving — a hands-off wall that surfaces activity across every site.
+
+Requires ONVIF (and its motion rule) to be enabled on the device; a camera without an
+event service is simply skipped. Motion clears on the camera's "off" event or after a
+few seconds without a new one.
 
 ## Bandwidth profiles
 
@@ -106,7 +120,7 @@ at grid input size — one tile ≈ 30 fps, two tiles ≈ 18 fps each, nine ≈ 
 
 For one frame, a heavier model goes further: right-click a tile → **"Reconstruire l'image
 (IA)"** runs **Real-ESRGAN** ×4 (generative restoration) and shows an original/reconstructed
-side-by-side in ~5–20 s, saved to Pictures/RTSP-TOOL.
+side-by-side in ~5–20 s, saved to Pictures/Sentinelle.
 
 The engine (`realesrgan-ncnn-vulkan`, BSD-3-Clause, any Vulkan GPU) is downloaded on demand
 (~45 MB) into the user profile — not redistributed here. Real-time mode reuses its bundled
@@ -138,7 +152,7 @@ The Configuration window opens on first run.
 Managed in the UI: add a site (fiber or 4G), add a DVR (address and credentials, then
 channel discovery or a manual list), then tick the cameras to display.
 
-Stored at `%APPDATA%\RTSP-TOOL\config.yaml` (Windows) or `~/.config/rtsp-tool/config.yaml`
+Stored at `%APPDATA%\Sentinelle\config.yaml` (Windows) or `~/.config/sentinelle/config.yaml`
 (Linux). A `config.yaml` next to the executable takes priority.
 
 Passwords are obfuscated in the file, not encrypted — the key ships with the app, so this
@@ -160,15 +174,21 @@ rtsp_tool/
 ├── config.py             Data model, brand URL templates, config.yaml read/write
 ├── probe.py              RTSP failure classification (auth / timeout / network)
 ├── snapshot.py           JPEG snapshots (ISAPI/CGI) and Hikvision channel discovery
-├── onvif.py              ONVIF: WS-Discovery, stream/snapshot URIs, PTZ (no heavy deps)
-├── enhance.py            Image enhancement engine (deband/sharpen + neural GLSL SR)
+├── onvif.py              ONVIF: WS-Discovery, stream/snapshot URIs, PTZ, motion events
+├── motion.py             ONVIF motion monitor (per-camera event subscription threads)
+├── dvr_tune.py           Dahua substream optimisation (MJPEG -> H.264)
+├── enhance.py            Image enhancement engine (deblock/sharpen + neural GLSL)
+├── neural.py             Real-time neural reconstruction (ncnn/Vulkan)
+├── reconstruct.py        Single-frame AI reconstruction (Real-ESRGAN)
 ├── player.py             libmpv loading, RTSP settings, upscaling
 ├── shaders/              Bundled Anime4K neural shaders (MIT) + attribution
 └── ui/
-    ├── main_window.py    Grid/single views, rotation, loops, enhancement, full screen
+    ├── main_window.py    Grid/single views, rotation, loops, motion, enhancement
     ├── tile.py           Video tile: state machine, backoff, stop on 401, zoom, PTZ
     ├── photo_tile.py     Photo-mode tile (extreme-eco profile)
-    ├── config_dialogs.py Sites, cameras, whole-DVR import, ONVIF network scan
+    ├── neural_tile.py    Real-time neural reconstruction tile
+    ├── config_dialogs.py Sites, cameras, whole-DVR import, ONVIF scan, DVR tuning
+    ├── reconstruct_dialog.py  Single-frame reconstruction viewer
     ├── sequence_editor.py Loop editor
     └── icons.py          SVG icons
 packaging/                .deb build, icon generation, deployment guide

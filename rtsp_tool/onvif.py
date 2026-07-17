@@ -29,6 +29,7 @@ SOAP_TIMEOUT = 6
 _NS_DEVICE = "http://www.onvif.org/ver10/device/wsdl"
 _NS_MEDIA = "http://www.onvif.org/ver10/media/wsdl"
 _NS_PTZ = "http://www.onvif.org/ver20/ptz/wsdl"
+_NS_EVENTS = "http://www.onvif.org/ver10/events/wsdl"
 _NS_SCHEMA = "http://www.onvif.org/ver10/schema"
 
 
@@ -188,6 +189,7 @@ class OnvifCamera:
         self._device_url = device_xaddr or f"http://{host}:{port}/onvif/device_service"
         self._media_url = ""
         self._ptz_url = ""
+        self._events_url = ""
 
     # --- SOAP ---
 
@@ -260,11 +262,18 @@ class OnvifCamera:
                 x = _find(ptz, "XAddr")
                 if x is not None and x.text:
                     self._ptz_url = x.text.strip()
+            events = _find(root, "Events")
+            if events is not None:
+                x = _find(events, "XAddr")
+                if x is not None and x.text:
+                    self._events_url = x.text.strip()
         # replis usuels si GetCapabilities muet
         if not self._media_url:
             self._media_url = f"http://{self.host}:{self.port}/onvif/Media"
         if not self._ptz_url:
             self._ptz_url = f"http://{self.host}:{self.port}/onvif/PTZ"
+        if not self._events_url:
+            self._events_url = f"http://{self.host}:{self.port}/onvif/Events"
 
     # --- API haut niveau ---
 
@@ -361,6 +370,58 @@ class OnvifCamera:
         body = (f'<Stop xmlns="{_NS_PTZ}"><ProfileToken>{_esc(token)}</ProfileToken>'
                 f'<PanTilt>true</PanTilt><Zoom>true</Zoom></Stop>')
         self._call(self._ptz_url, body)
+
+    # --- Événements de mouvement (ONVIF Events / PullPoint) ---
+
+    def abonner_mouvement(self, duree: str = "PT1M") -> str:
+        """Crée un abonnement PullPoint aux événements. Retourne l'URL de tirage."""
+        self._resolve_services()
+        body = (f'<CreatePullPointSubscription xmlns="{_NS_EVENTS}">'
+                f'<InitialTerminationTime>{duree}</InitialTerminationTime>'
+                f'</CreatePullPointSubscription>')
+        root = self._call(self._events_url, body)
+        # SubscriptionReference/Address (WS-Addressing)
+        for ref in _findall(root, "SubscriptionReference"):
+            adr = _find(ref, "Address")
+            if adr is not None and (adr.text or "").strip():
+                return adr.text.strip()
+        adr = _find(root, "Address")
+        return (adr.text or "").strip() if adr is not None else self._events_url
+
+    def tirer_mouvement(self, endpoint: str, timeout: str = "PT5S",
+                        limite: int = 20) -> list:
+        """PullMessages. Retourne [(source, actif: bool)] pour les événements de mouvement."""
+        body = (f'<PullMessages xmlns="{_NS_EVENTS}">'
+                f'<Timeout>{timeout}</Timeout><MessageLimit>{limite}</MessageLimit>'
+                f'</PullMessages>')
+        root = self._call(endpoint or self._events_url, body, timeout=12)
+        resultats = []
+        for msg in _findall(root, "NotificationMessage"):
+            topic_el = _find(msg, "Topic")
+            topic = (topic_el.text or "") if topic_el is not None else ""
+            # état : SimpleItem Name in {IsMotion,State,Motion} Value in {true,false}
+            actif = None
+            source = ""
+            for item in _findall(msg, "SimpleItem"):
+                nom = (item.get("Name") or "")
+                val = (item.get("Value") or "")
+                if nom.lower() in ("ismotion", "state", "motion", "motionalarm"):
+                    actif = val.strip().lower() in ("true", "1")
+                elif nom.lower() in ("source", "videosourceconfigurationtoken",
+                                     "videosourcetoken", "channel", "token"):
+                    source = val.strip()
+            est_mouvement = ("motion" in topic.lower() or actif is not None)
+            if est_mouvement and actif is not None:
+                resultats.append((source, actif))
+        return resultats
+
+    def a_les_evenements(self) -> bool:
+        """Vérifie que le service Events répond (abonnement test)."""
+        try:
+            self.abonner_mouvement("PT10S")
+            return True
+        except Exception:
+            return False
 
 
 # ------------------------------------------------------------------- utils
