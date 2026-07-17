@@ -52,9 +52,9 @@ PROFILS = {
 }
 
 PROFIL_LABELS = {
-    "normal": "Normal (fibre) — substream en grille, HD en mono",
-    "eco": "Éco (4G) — substream partout",
-    "eco-extreme": "Éco extrême (4G faible) — photo périodique en grille",
+    "normal": "Normal",
+    "eco": "Éco",
+    "eco-extreme": "Ultra éco",
 }
 
 # Gabarits d'URL RTSP par marque : (chemin mainstream, chemin substream).

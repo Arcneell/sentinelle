@@ -33,8 +33,8 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Sentinelle")
 
-    from .ui.theme import apply_dark_theme
-    apply_dark_theme(app)
+    from .ui.theme import apply_theme
+    apply_theme(app)          # thème mémorisé (sombre par défaut)
     from .ui.icons import app_icon
     app.setWindowIcon(app_icon())
 
@@ -51,14 +51,7 @@ def main() -> int:
 
     win = MainWindow(config_path)
     win.show()
-    rc = app.exec()
-
-    # ncnn/Vulkan (reconstruction temps réel) plante parfois au démontage du
-    # process — sortie directe pour éviter un faux « crash » à la fermeture
-    from . import neural
-    if neural._net is not None:
-        os._exit(rc)
-    return rc
+    return app.exec()
 
 
 if __name__ == "__main__":

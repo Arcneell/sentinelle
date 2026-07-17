@@ -44,7 +44,7 @@ class EtapeDialog(QDialog):
             self._liste.addItem(it)
 
         self._aide = QLabel()
-        self._aide.setStyleSheet("color: #909090;")
+        self._aide.setObjectName("hint")
         self._mode.currentIndexChanged.connect(self._maj_aide)
         self._maj_aide()
 

@@ -23,7 +23,6 @@ fi
 python3 -m venv /tmp/venv
 /tmp/venv/bin/pip install --quiet -r requirements.txt pyinstaller
 /tmp/venv/bin/pyinstaller --noconfirm --windowed --name sentinelle \
-    --add-data "rtsp_tool/shaders:rtsp_tool/shaders" \
     --add-data "rtsp_tool/ui/sentinelle.png:rtsp_tool/ui" \
     --distpath /tmp/dist --workpath /tmp/build run.py
 

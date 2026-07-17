@@ -37,7 +37,7 @@ class _ImageLabel(QLabel):
         super().__init__()
         self._pixmap: QPixmap | None = None
         self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("background-color: black;")
+        self.setStyleSheet("background-color: #0a0b0d;")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMinimumSize(QSize(32, 24))
 
@@ -76,6 +76,7 @@ class PhotoTile(QFrame):
         self._fetching = False
         self._stopped = True
         self._last_bytes: bytes | None = None
+        self._motion_on = False
 
         self._build_ui()
 
@@ -86,33 +87,27 @@ class PhotoTile(QFrame):
 
     def _build_ui(self):
         self.setFrameShape(QFrame.StyledPanel)
-        self.setStyleSheet(
-            "PhotoTile { background-color: #101010; border: 1px solid #303030; }")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        header = QWidget()
-        header.setStyleSheet("background-color: #1c1c1c;")
-        h = QHBoxLayout(header)
-        h.setContentsMargins(6, 2, 6, 2)
+        self._header = QWidget()
+        h = QHBoxLayout(self._header)
+        h.setContentsMargins(8, 4, 8, 4)
         self._dot = QLabel()
         self._dot.setFixedSize(10, 10)
         self._title = QLabel(f"{self.camera.nom} — {self.camera.site.nom}")
-        self._title.setStyleSheet("color: #d0d0d0; font-weight: bold;")
         self._info = QLabel(f"photo · {self._intervalle}s")
-        self._info.setStyleSheet("color: #707070;")
         h.addWidget(self._dot)
         h.addWidget(self._title)
         h.addStretch()
         h.addWidget(self._info)
-        root.addWidget(header)
+        root.addWidget(self._header)
 
         self._image = _ImageLabel()
         self._status = QLabel()
         self._status.setAlignment(Qt.AlignCenter)
         self._status.setWordWrap(True)
-        self._status.setStyleSheet("color: #a0a0a0; padding: 8px;")
         body = QVBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
@@ -121,7 +116,26 @@ class PhotoTile(QFrame):
         root.addLayout(body, 1)
         self._status.hide()
 
+        self.restyle()
         self._set_state(TileState.IDLE, "En attente")
+
+    def restyle(self):
+        """(Ré)applique les couleurs du thème courant."""
+        from .theme import t
+        self._apply_frame_style()
+        self._header.setStyleSheet(f"background-color: {t('tile_header')};")
+        self._title.setStyleSheet(f"color: {t('text')}; font-weight: 600;")
+        self._info.setStyleSheet(f"color: {t('text_dim')};")
+        self._status.setStyleSheet(f"color: {t('tile_status_text')}; padding: 8px;")
+        self._dot.setStyleSheet(
+            f"background-color: {_DOT_COLORS[self.state]}; border-radius: 5px;")
+
+    def _apply_frame_style(self):
+        from .theme import t
+        c = t("danger") if self._motion_on else t("border")
+        w = 3 if self._motion_on else 1
+        self.setStyleSheet(
+            f"PhotoTile {{ background-color: {t('tile_bg')}; border: {w}px solid {c}; }}")
 
     def _set_state(self, state: TileState, message: str = ""):
         self.state = state
@@ -139,36 +153,16 @@ class PhotoTile(QFrame):
         event.accept()
 
     def set_motion(self, actif: bool):
-        c = "#e04040" if actif else "#303030"
-        w = 3 if actif else 1
-        self.setStyleSheet(f"PhotoTile {{ background-color: #101010; border: {w}px solid {c}; }}")
+        self._motion_on = actif
+        self._apply_frame_style()
 
     def contextMenuEvent(self, event):
         from .icons import icon
         menu = QMenu(self)
         act = menu.addAction(icon("camera"), "Enregistrer l'image")
         act.setEnabled(self._last_bytes is not None)
-        act_ia = menu.addAction(icon("search"), "Reconstruire l'image…")
-        act_ia.setEnabled(self._last_bytes is not None)
-        choix = menu.exec(event.globalPos())
-        if choix is act:
+        if menu.exec(event.globalPos()) is act:
             self._save_snapshot()
-        elif choix is act_ia:
-            self._reconstruire_ia()
-
-    def _reconstruire_ia(self):
-        if not self._last_bytes:
-            return
-        import os
-        import tempfile
-        fd, tmp = tempfile.mkstemp(suffix=".png", prefix="rtsp-tool-ia-")
-        os.close(fd)
-        from PySide6.QtGui import QPixmap
-        pix = QPixmap()
-        if not pix.loadFromData(self._last_bytes) or not pix.save(tmp, "PNG"):
-            return
-        from .reconstruct_dialog import reconstruire_image
-        reconstruire_image(self.window(), self.camera, tmp)
 
     # ---------------------------------------------------------- cycle de vie
 

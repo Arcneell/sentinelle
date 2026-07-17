@@ -2,11 +2,3 @@ PySide6>=6.8
 python-mpv>=1.0.7
 PyYAML>=6.0
 requests>=2.31
-
-# Reconstruction neuronale (optionnel — l'appli fonctionne sans) :
-#   - mode photo : moteur Real-ESRGAN téléchargé à la demande (pas un paquet pip)
-#   - temps réel : ncnn (Vulkan) + OpenCV pour décoder le flux
-ncnn>=1.0
-opencv-python-headless>=4.9
-numpy>=1.24
-Pillow>=10.0

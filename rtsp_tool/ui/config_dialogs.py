@@ -24,10 +24,9 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
                                QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
-from ..config import (ENHANCE_NIVEAUX, LIENS, MARQUE_LABELS, MARQUES,
-                      MARQUES_URL_LIBRE, PROFIL_LABELS, PROFILS, AppConfig,
-                      Camera, Site, purger_cameras_sequences)
-from ..enhance import NIVEAU_LABELS as ENHANCE_LABELS
+from ..config import (LIENS, MARQUE_LABELS, MARQUES, MARQUES_URL_LIBRE,
+                      PROFIL_LABELS, PROFILS, AppConfig, Camera, Site,
+                      purger_cameras_sequences)
 from ..snapshot import lister_canaux_hikvision
 from .icons import icon
 
@@ -67,10 +66,10 @@ class SiteDialog(QDialog):
         form.addRow("Nom du site :", self._nom)
         form.addRow("Type de lien :", self._lien)
 
-        info = QLabel("Sur un site 4G, les nouvelles caméras passent d'office "
-                      "en profil Éco (substream partout).")
+        info = QLabel("Sur un site 4G, les nouvelles caméras adoptent d'office le "
+                      "profil Éco (sous-flux partout) pour préserver la bande passante.")
         info.setWordWrap(True)
-        info.setStyleSheet("color: #909090;")
+        info.setObjectName("hint")
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         boutons.accepted.connect(self._valider)
@@ -126,12 +125,6 @@ class CameraDialog(QDialog):
             self._profil.addItem(PROFIL_LABELS[p], p)
         self._profil.setCurrentIndex(_PROFILS_ORDONNES.index(
             camera.profil if camera else _profil_defaut(cible)))
-
-        self._amelioration = QComboBox()
-        for n in ENHANCE_NIVEAUX:
-            self._amelioration.addItem(ENHANCE_LABELS[n], n)
-        self._amelioration.setCurrentIndex(
-            ENHANCE_NIVEAUX.index(camera.amelioration if camera else "leger"))
 
         self._marque = QComboBox()
         for m in MARQUES:
@@ -190,7 +183,6 @@ class CameraDialog(QDialog):
         form.addRow("Site :", self._site)
         form.addRow("Marque :", self._marque)
         form.addRow("Profil bande passante :", self._profil)
-        form.addRow("Amélioration d'image :", self._amelioration)
         form.addRow("Utilisateur DVR :", self._user)
         form.addRow("Mot de passe :", pwd_row)
         form.addRow(self._lbl_photo, self._photo_int)
@@ -205,7 +197,7 @@ class CameraDialog(QDialog):
         ligne_actions.addWidget(self._btn_test)
         self._statut = QLabel("")
         self._statut.setWordWrap(True)
-        self._statut.setStyleSheet("color: #909090;")
+        self._statut.setObjectName("hint")
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         boutons.accepted.connect(self._valider)
@@ -364,7 +356,6 @@ class CameraDialog(QDialog):
         cam.url_substream = self._url_sub.text().strip()
         cam.url_snapshot = self._url_snap.text().strip()
         cam.photo_intervalle_s = self._photo_int.value()
-        cam.amelioration = self._amelioration.currentData()
         cam.ptz = self._onvif_ptz if cam.marque == "onvif" else False
         cam.onvif_profile = self._onvif_profile if cam.marque == "onvif" else ""
         return cam
@@ -435,7 +426,7 @@ class DvrDialog(QDialog):
         ligne_scan.addWidget(btn_manuel, 1)
 
         self._statut = QLabel("")
-        self._statut.setStyleSheet("color: #909090;")
+        self._statut.setObjectName("hint")
 
         self._table = QTableWidget(0, 3)
         self._table.setHorizontalHeaderLabels(["", "Canal", "Nom de la caméra"])
@@ -580,9 +571,9 @@ class OnvifScanDialog(QDialog):
 
         self._btn_scan = QPushButton(icon("search"), " Rechercher les caméras ONVIF")
         self._btn_scan.clicked.connect(self._scanner)
-        self._statut = QLabel("Recherche des caméras ONVIF du réseau local.")
+        self._statut = QLabel("Recherche des caméras ONVIF présentes sur le réseau local.")
         self._statut.setWordWrap(True)
-        self._statut.setStyleSheet("color: #909090;")
+        self._statut.setObjectName("hint")
 
         self._table = QTableWidget(0, 3)
         self._table.setHorizontalHeaderLabels(["", "Nom", "Adresse"])
@@ -725,7 +716,7 @@ class OnvifScanDialog(QDialog):
 # ---------------------------------------------------------------- ConfigDialog
 
 class ConfigDialog(QDialog):
-    """Gestionnaire ⚙ : tout se configure ici, de A à Z."""
+    """Gestionnaire de configuration : sites, caméras, DVR et réglages généraux."""
 
     def __init__(self, cfg: AppConfig, parent=None):
         super().__init__(parent)
@@ -733,67 +724,83 @@ class ConfigDialog(QDialog):
         self.modifie = False
         self.setWindowTitle("Configuration")
         self.setWindowIcon(icon("settings"))
-        self.setMinimumSize(640, 480)
+        self.setMinimumSize(720, 560)
 
+        # --- barre d'actions : ajouter ---
+        btn_dvr = QPushButton(icon("plus"), " DVR complet")
+        btn_dvr.setToolTip("Ajouter d'un coup toutes les caméras d'un enregistreur")
+        btn_dvr.clicked.connect(self._ajouter_dvr)
+        btn_cam = QPushButton(icon("plus"), " Caméra")
+        btn_cam.setToolTip("Ajouter une caméra")
+        btn_cam.clicked.connect(self._ajouter_camera)
+        btn_site = QPushButton(icon("plus"), " Site")
+        btn_site.setToolTip("Ajouter un site (un lieu)")
+        btn_site.clicked.connect(self._ajouter_site)
+        btn_onvif = QPushButton(icon("search"), " Recherche ONVIF")
+        btn_onvif.setToolTip("Détecter les caméras ONVIF présentes sur le réseau")
+        btn_onvif.clicked.connect(self._scan_onvif)
+        barre = QHBoxLayout()
+        barre.setSpacing(6)
+        for b in (btn_dvr, btn_cam, btn_site, btn_onvif):
+            barre.addWidget(b)
+        barre.addStretch(1)
+
+        # --- arbre sites / caméras ---
         self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Sites / Caméras", "Détails"])
+        self._tree.setHeaderLabels(["Sites et caméras", "Détails"])
         self._tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self._tree.itemDoubleClicked.connect(lambda *_: self._modifier())
+        self._tree.itemSelectionChanged.connect(self._maj_boutons)
 
-        btn_dvr = QPushButton(icon("plus"), " Ajouter un DVR…")
-        btn_dvr.clicked.connect(self._ajouter_dvr)
-        btn_onvif = QPushButton(icon("search"), " Scan réseau (ONVIF)…")
-        btn_onvif.clicked.connect(self._scan_onvif)
-        btn_cam = QPushButton(icon("plus"), " Caméra seule…")
-        btn_cam.clicked.connect(self._ajouter_camera)
-        btn_site = QPushButton(icon("plus"), " Site…")
-        btn_site.clicked.connect(self._ajouter_site)
-        btn_edit = QPushButton(icon("pencil"), " Modifier…")
-        btn_edit.clicked.connect(self._modifier)
-        btn_del = QPushButton(icon("trash"), " Supprimer")
-        btn_del.clicked.connect(self._supprimer)
-        btn_opt = QPushButton(icon("settings"), " Optimiser le flux (DVR)…")
-        btn_opt.setToolTip("Améliore la qualité du sous-flux dans le DVR (Dahua)")
-        btn_opt.clicked.connect(self._optimiser_dvr)
+        # --- édition de l'élément sélectionné ---
+        self._btn_edit = QPushButton(icon("pencil"), " Modifier")
+        self._btn_edit.clicked.connect(self._modifier)
+        self._btn_del = QPushButton(icon("trash"), " Supprimer")
+        self._btn_del.clicked.connect(self._supprimer)
+        edition = QHBoxLayout()
+        edition.addStretch(1)
+        edition.addWidget(self._btn_edit)
+        edition.addWidget(self._btn_del)
 
+        # --- réglages généraux ---
         self._rot = QSpinBox()
         self._rot.setRange(3, 3600)
         self._rot.setSuffix(" s")
         self._rot.setValue(cfg.rotation_duree_s)
+        reglages = QGroupBox("Réglages généraux")
+        rg = QFormLayout(reglages)
+        rg.setContentsMargins(12, 8, 12, 8)
+        rg.setHorizontalSpacing(18)
+        rg.setLabelAlignment(Qt.AlignLeft)
+        rg.addRow("Durée de rotation", self._rot)
 
-        droite = QVBoxLayout()
-        droite.addWidget(btn_dvr)
-        droite.addWidget(btn_onvif)
-        droite.addWidget(btn_cam)
-        droite.addWidget(btn_site)
-        droite.addSpacing(16)
-        droite.addWidget(btn_edit)
-        droite.addWidget(btn_del)
-        droite.addWidget(btn_opt)
-        droite.addSpacing(16)
-        droite.addWidget(QLabel("Durée de rotation :"))
-        droite.addWidget(self._rot)
-        droite.addStretch()
-
-        centre = QHBoxLayout()
-        centre.addWidget(self._tree, 1)
-        centre.addLayout(droite)
-
-        note = QLabel("Utilisez de préférence un compte DVR en lecture seule.")
+        note = QLabel("Conseil : utilisez de préférence un compte DVR en lecture seule.")
         note.setWordWrap(True)
-        note.setStyleSheet("color: #909090;")
+        note.setObjectName("hint")
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         boutons.button(QDialogButtonBox.Ok).setText("Enregistrer")
+        boutons.button(QDialogButtonBox.Cancel).setText("Annuler")
         boutons.accepted.connect(self._terminer)
         boutons.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
-        lay.addLayout(centre, 1)
+        lay.setSpacing(10)
+        lay.addLayout(barre)
+        lay.addWidget(self._tree, 1)
+        lay.addLayout(edition)
+        lay.addWidget(reglages)
         lay.addWidget(note)
         lay.addWidget(boutons)
 
+        self._maj_boutons()
         self._rafraichir()
+
+    def _maj_boutons(self):
+        """Active Modifier / Supprimer seulement si un élément est sélectionné."""
+        actif = self._selection() is not None
+        self._btn_edit.setEnabled(actif)
+        self._btn_del.setEnabled(actif)
 
     # -------------------------------------------------------------- affichage
 
@@ -866,49 +873,6 @@ class ConfigDialog(QDialog):
             dlg.appliquer()
             self.modifie = True
             self._rafraichir()
-
-    def _optimiser_dvr(self):
-        """Passe le sous-flux du DVR (Dahua) en H.264 pour une image nette."""
-        sel = self._selection()
-        cams = []
-        if sel and sel[0] == "camera":
-            c = self._cfg.camera(sel[1])
-            cams = [c] if c else []
-        elif sel and sel[0] == "site":
-            cams = [c for c in self._cfg.cameras if c.site.id == sel[1]]
-        cams = [c for c in cams if c.marque in ("dahua", "amcrest")]
-        if not cams:
-            QMessageBox.information(
-                self, "Optimiser le flux",
-                "Sélectionnez une caméra (ou un site) Dahua.\n"
-                "Cette optimisation s'applique aux DVR Dahua.")
-            return
-
-        from ..dvr_tune import lire_substream, optimiser_substream
-        etat = lire_substream(cams[0])
-        avant = (f"Actuel : {etat['compression']}, {etat['bitrate']} kbps, "
-                 f"{etat['fps']} i/s, {etat['w']}×{etat['h']}\n\n"
-                 if etat.get("ok") else "")
-        n = len(cams)
-        cible = "cette caméra" if n == 1 else f"les {n} caméras de ce site"
-        if QMessageBox.question(
-                self, "Optimiser le flux",
-                f"{avant}Passer le sous-flux de {cible} en H.264 "
-                f"(1024 kbps, 15 i/s) ?\n\n"
-                "N'affecte ni le flux HD ni l'enregistrement. Réversible depuis "
-                "l'interface web du DVR.") != QMessageBox.Yes:
-            return
-
-        ok, ko = [], []
-        for c in cams:
-            reussi, msg = optimiser_substream(c)
-            (ok if reussi else ko).append(f"{c.nom} : {msg}")
-        txt = ""
-        if ok:
-            txt += f"Optimisées ({len(ok)}) :\n" + "\n".join(ok)
-        if ko:
-            txt += ("\n\n" if txt else "") + f"Échecs ({len(ko)}) :\n" + "\n".join(ko)
-        QMessageBox.information(self, "Optimiser le flux", txt or "Rien à faire.")
 
     def _modifier(self):
         sel = self._selection()

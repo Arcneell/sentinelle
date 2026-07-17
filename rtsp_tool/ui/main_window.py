@@ -11,13 +11,13 @@ Règles bande passante appliquées ici :
 import logging
 import math
 
-from PySide6.QtCore import QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import (QComboBox, QDockWidget, QGridLayout, QLabel,
-                               QMainWindow, QMenu, QMessageBox, QSpinBox,
-                               QStackedWidget, QToolBar, QToolButton,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QHBoxLayout,
+                               QLabel, QMainWindow, QMenu, QMessageBox,
+                               QPushButton, QSpinBox, QSplitter, QStackedWidget,
+                               QToolButton, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__
 from ..config import (AppConfig, load_config, purger_cameras_sequences,
@@ -35,7 +35,6 @@ CAP_CHOICES = [("Auto (16 max)", 16), ("1×1", 1), ("2×2", 4), ("3×3", 9), ("4
 
 
 class MainWindow(QMainWindow):
-    _fsrcnnx_fini = Signal(bool, str)
 
     def __init__(self, config_path: str):
         super().__init__()
@@ -46,167 +45,45 @@ class MainWindow(QMainWindow):
         self._page = 0
         self._seq = None                            # séquence en cours de lecture
         self._seq_idx = -1
-        self._enhance_override = "auto"             # amélioration : override global live
         self._motion = None                         # MotionMonitor (ONVIF)
         self._motion_ids = set()                    # caméras actuellement en mouvement
+        self._icon_widgets = []                     # (widget, nom_icone) à recolorer
         self._settings = QSettings("Sentinelle", "viewer")
 
-        self.setWindowTitle(f"{APP_NAME} v{__version__}")
+        self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
-        self.resize(1280, 800)
+        self.resize(1320, 820)
         self._build_ui()
         self._load_config(initial=True)
 
     # ------------------------------------------------------------------- UI
 
+    # ------------------------------------------------------------------- UI
+    #
+    # Structure : une barre de titre applicative (marque + commandes), puis un
+    # espace de travail scindé — panneau des caméras à gauche, mur d'images à
+    # droite. Pas de barre d'outils Qt ni de dock : tout est intégré et plat.
+
     def _build_ui(self):
-        tb = QToolBar("Affichage")
-        tb.setMovable(False)
-        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.addToolBar(tb)
+        root = QWidget()
+        root.setObjectName("root")
+        vroot = QVBoxLayout(root)
+        vroot.setContentsMargins(0, 0, 0, 0)
+        vroot.setSpacing(0)
+        vroot.addWidget(self._build_topbar())
 
-        self._act_grid = QAction(icon("grid"), "Grille", self)
-        self._act_grid.setShortcut(QKeySequence("Ctrl+G"))
-        self._act_grid.triggered.connect(self._retour_manuel_grille)
-        self._act_grid.setEnabled(False)
-        tb.addAction(self._act_grid)
+        self._split = QSplitter(Qt.Horizontal)
+        self._split.setObjectName("workspace")
+        self._split.setHandleWidth(1)
+        self._split.addWidget(self._build_sidebar())
+        self._split.addWidget(self._build_stage())
+        self._split.setStretchFactor(0, 0)
+        self._split.setStretchFactor(1, 1)
+        self._split.setSizes([260, 1060])
+        vroot.addWidget(self._split, 1)
+        self.setCentralWidget(root)
 
-        tb.addWidget(QLabel(" Tuiles : "))
-        self._cap_combo = QComboBox()
-        for label, _cap in CAP_CHOICES:
-            self._cap_combo.addItem(label)
-        self._cap_combo.currentIndexChanged.connect(self._selection_changee)
-        tb.addWidget(self._cap_combo)
-        tb.addSeparator()
-
-        # --- rotation automatique ---
-        self._act_rotation = QAction(icon("rotate"), "Rotation", self)
-        self._act_rotation.setCheckable(True)
-        self._act_rotation.setToolTip("Fait défiler automatiquement les caméras affichées")
-        self._act_rotation.toggled.connect(self._rotation_basculee)
-        tb.addAction(self._act_rotation)
-
-        self._rot_spin = QSpinBox()
-        self._rot_spin.setRange(3, 3600)
-        self._rot_spin.setSuffix(" s")
-        self._rot_spin.valueChanged.connect(self._rotation_duree_changee)
-        tb.addWidget(self._rot_spin)
-        tb.addSeparator()
-
-        # --- séquences ---
-        tb.addWidget(QLabel(" Boucle : "))
-        self._seq_combo = QComboBox()
-        self._seq_combo.setMinimumWidth(140)
-        tb.addWidget(self._seq_combo)
-
-        self._act_seq = QAction(icon("play"), "Jouer", self)
-        self._act_seq.setCheckable(True)
-        self._act_seq.setToolTip("Jouer / arrêter la boucle sélectionnée")
-        self._act_seq.toggled.connect(self._seq_basculee)
-        tb.addAction(self._act_seq)
-
-        act_seq_edit = QAction(icon("pencil"), "Boucles…", self)
-        act_seq_edit.triggered.connect(self._editer_sequences)
-        tb.addAction(act_seq_edit)
-        tb.addSeparator()
-
-        # --- amélioration d'image (override live pour toutes les tuiles) ---
-        tb.addWidget(QLabel(" Image : "))
-        self._enh_combo = QComboBox()
-        self._enh_combo.addItem("Selon caméra", "auto")
-        self._enh_combo.addItem("Aucune", "off")
-        self._enh_combo.addItem("Légère", "leger")
-        self._enh_combo.addItem("Forte", "sr")
-        self._enh_combo.addItem("Maximale", "max")
-        self._enh_combo.addItem("Reconstruction IA", "rt")
-        self._enh_combo.setToolTip("Amélioration de l'image des caméras")
-        self._enh_combo.currentIndexChanged.connect(self._enhance_change)
-        tb.addWidget(self._enh_combo)
-        act_dl = QAction(icon("plus"), "Moteur de netteté…", self)
-        act_dl.setToolTip("Télécharge un moteur de netteté supplémentaire (FSRCNNX)")
-        act_dl.triggered.connect(self._telecharger_fsrcnnx)
-        tb.addAction(act_dl)
-        self._fsrcnnx_fini.connect(self._on_fsrcnnx_fini)
-        tb.addSeparator()
-
-        # --- détection de mouvement (ONVIF) ---
-        self._act_motion = QAction(icon("motion"), "Mouvement", self)
-        self._act_motion.setCheckable(True)
-        self._act_motion.setToolTip("Surligne en rouge les caméras qui détectent "
-                                    "du mouvement (via ONVIF)")
-        self._act_motion.toggled.connect(self._motion_basculee)
-        tb.addAction(self._act_motion)
-
-        self._act_motion_auto = QAction(icon("grid"), "Vue mouvement", self)
-        self._act_motion_auto.setCheckable(True)
-        self._act_motion_auto.setToolTip("Affiche automatiquement dans la grille "
-                                         "les caméras en mouvement")
-        self._act_motion_auto.toggled.connect(self._motion_auto_basculee)
-        tb.addAction(self._act_motion_auto)
-        tb.addSeparator()
-
-        self._act_pause = QAction(icon("pause"), "Tout arrêter", self)
-        self._act_pause.setCheckable(True)
-        self._act_pause.setToolTip("Ferme tous les flux sans perdre la sélection")
-        self._act_pause.toggled.connect(self._pause_basculee)
-        tb.addAction(self._act_pause)
-
-        # --- plein écran (multi-moniteurs) ---
-        self._btn_full = QToolButton()
-        self._btn_full.setIcon(icon("maximize"))
-        self._btn_full.setText("Plein écran")
-        self._btn_full.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._btn_full.setPopupMode(QToolButton.MenuButtonPopup)
-        self._btn_full.clicked.connect(self._toggle_fullscreen)
-        menu_full = QMenu(self._btn_full)
-        menu_full.aboutToShow.connect(lambda: self._peupler_menu_ecrans(menu_full))
-        self._btn_full.setMenu(menu_full)
-        tb.addWidget(self._btn_full)
-
-        act_full = QAction(self)
-        act_full.setShortcut(QKeySequence("F11"))
-        act_full.triggered.connect(self._toggle_fullscreen)
-        self.addAction(act_full)
-
-        act_cfg = QAction(icon("settings"), "Configuration", self)
-        act_cfg.setShortcut(QKeySequence("Ctrl+,"))
-        act_cfg.setToolTip("Sites, caméras et réglages")
-        act_cfg.triggered.connect(self._ouvrir_configuration)
-        tb.addAction(act_cfg)
-
-        # --- panneau caméras ---
-        self._tree = QTreeWidget()
-        self._tree.setHeaderLabel("Sites / Caméras")
-        self._tree.itemChanged.connect(self._coche_changee)
-        self._tree.itemDoubleClicked.connect(self._arbre_double_clic)
-        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._tree.customContextMenuRequested.connect(self._menu_arbre)
-        dock = QDockWidget("Caméras", self)
-        dock.setWidget(self._tree)
-        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
-        self._dock = dock
-
-        # --- pages centrales ---
-        self._grid_page = QWidget()
-        self._grid_page.setStyleSheet("background-color: #060606;")
-        self._grid_layout = QGridLayout(self._grid_page)
-        self._grid_layout.setContentsMargins(2, 2, 2, 2)
-        self._grid_layout.setSpacing(2)
-
-        self._placeholder = QLabel()
-        self._placeholder.setAlignment(Qt.AlignCenter)
-        self._placeholder.setStyleSheet("color: #707070; font-size: 14px;")
-
-        self._mono_page = QWidget()
-        self._mono_page.setStyleSheet("background-color: #060606;")
-        self._mono_layout = QVBoxLayout(self._mono_page)
-        self._mono_layout.setContentsMargins(2, 2, 2, 2)
-
-        self._stack = QStackedWidget()
-        self._stack.addWidget(self._grid_page)
-        self._stack.addWidget(self._mono_page)
-        self.setCentralWidget(self._stack)
+        self._apply_theme_chrome()
 
         # --- barre d'état ---
         self._status_streams = QLabel()
@@ -215,6 +92,186 @@ class MainWindow(QMainWindow):
         self._status_timer.setInterval(1000)
         self._status_timer.timeout.connect(self._update_status)
         self._status_timer.start()
+
+        self._init_timers()
+
+    # ------------------------------------------------------------ barre de titre
+
+    def _build_topbar(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("topbar")
+        bar.setFixedHeight(56)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(14, 0, 12, 0)
+        lay.setSpacing(8)
+
+        marque = QLabel(APP_NAME)
+        marque.setObjectName("brand")
+        lay.addWidget(marque)
+        lay.addWidget(self._sep())
+
+        # retour grille (actif seulement en vue plein cadre)
+        self._act_grid = self._tbtn("grid", "Grille", "Revenir à la grille (Ctrl+G)",
+                                    self._retour_manuel_grille)
+        self._act_grid.setEnabled(False)
+        lay.addWidget(self._act_grid)
+
+        self._cap_combo = QComboBox()
+        for label, _cap in CAP_CHOICES:
+            self._cap_combo.addItem(label)
+        self._cap_combo.setToolTip("Nombre de caméras affichées par page")
+        self._cap_combo.currentIndexChanged.connect(self._selection_changee)
+        lay.addWidget(self._cap_combo)
+        lay.addWidget(self._sep())
+
+        # rotation
+        self._act_rotation = self._tbtn("rotate", "Rotation",
+                                        "Faire défiler automatiquement les caméras",
+                                        self._rotation_basculee, checkable=True)
+        lay.addWidget(self._act_rotation)
+        self._rot_spin = QSpinBox()
+        self._rot_spin.setRange(3, 3600)
+        self._rot_spin.setSuffix(" s")
+        self._rot_spin.setToolTip("Délai avant de passer à la suite")
+        self._rot_spin.valueChanged.connect(self._rotation_duree_changee)
+        lay.addWidget(self._rot_spin)
+        lay.addWidget(self._sep())
+
+        # boucles
+        self._seq_combo = QComboBox()
+        self._seq_combo.setMinimumWidth(150)
+        self._seq_combo.setToolTip("Boucle à lire")
+        lay.addWidget(self._seq_combo)
+        self._act_seq = self._tbtn("play", "Lire",
+                                   "Lire ou arrêter la boucle sélectionnée",
+                                   self._seq_basculee, checkable=True)
+        lay.addWidget(self._act_seq)
+        self._btn_seq_edit = self._tbtn("pencil", "", "Créer et modifier les boucles",
+                                        self._editer_sequences)
+        lay.addWidget(self._btn_seq_edit)
+
+        # détection de mouvement (masquée si aucune caméra ONVIF)
+        self._motion_box = QWidget()
+        mlay = QHBoxLayout(self._motion_box)
+        mlay.setContentsMargins(0, 0, 0, 0)
+        mlay.setSpacing(8)
+        mlay.addWidget(self._sep())
+        self._act_motion = self._tbtn("motion", "Mouvement",
+                                      "Surligner les caméras qui détectent un mouvement (ONVIF)",
+                                      self._motion_basculee, checkable=True)
+        mlay.addWidget(self._act_motion)
+        self._act_motion_auto = self._tbtn("grid", "Vue mouvement",
+                                           "N'afficher que les caméras en mouvement",
+                                           self._motion_auto_basculee, checkable=True)
+        mlay.addWidget(self._act_motion_auto)
+        lay.addWidget(self._motion_box)
+
+        lay.addStretch(1)
+
+        # commandes générales, alignées à droite
+        self._act_pause = self._tbtn("pause", "Tout arrêter",
+                                     "Fermer tous les flux sans perdre la sélection",
+                                     self._pause_basculee, checkable=True)
+        lay.addWidget(self._act_pause)
+
+        self._btn_full = QToolButton()
+        self._btn_full.setIcon(icon("maximize"))
+        self._btn_full.setText("Plein écran")
+        self._btn_full.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._btn_full.setPopupMode(QToolButton.MenuButtonPopup)
+        self._btn_full.setToolTip("Plein écran (F11) — le menu permet de choisir l'écran")
+        self._btn_full.clicked.connect(self._toggle_fullscreen)
+        menu_full = QMenu(self._btn_full)
+        menu_full.aboutToShow.connect(lambda: self._peupler_menu_ecrans(menu_full))
+        self._btn_full.setMenu(menu_full)
+        self._icon_widgets.append((self._btn_full, "maximize"))
+        lay.addWidget(self._btn_full)
+
+        self._btn_cfg = self._tbtn("settings", "Configuration",
+                                   "Sites, caméras et réglages (Ctrl+,)",
+                                   self._ouvrir_configuration)
+        lay.addWidget(self._btn_cfg)
+
+        # raccourcis clavier (indépendants des boutons)
+        for seq, slot in (("Ctrl+G", self._retour_manuel_grille),
+                          ("F11", self._toggle_fullscreen),
+                          ("Ctrl+,", self._ouvrir_configuration)):
+            a = QAction(self)
+            a.setShortcut(QKeySequence(seq))
+            a.triggered.connect(slot)
+            self.addAction(a)
+
+        self._topbar = bar
+        return bar
+
+    # --------------------------------------------------------------- panneau caméras
+
+    def _build_sidebar(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("sidebar")
+        panel.setMinimumWidth(210)
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        entete = QFrame()
+        entete.setObjectName("sideHeader")
+        eh = QHBoxLayout(entete)
+        eh.setContentsMargins(14, 12, 14, 12)
+        titre = QLabel("CAMÉRAS")
+        titre.setObjectName("sideTitle")
+        self._side_count = QLabel("")
+        self._side_count.setObjectName("sideCount")
+        eh.addWidget(titre)
+        eh.addStretch(1)
+        eh.addWidget(self._side_count)
+        v.addWidget(entete)
+
+        self._tree = QTreeWidget()
+        self._tree.setObjectName("cameraTree")
+        self._tree.setHeaderHidden(True)
+        self._tree.setIndentation(14)
+        self._tree.itemChanged.connect(self._coche_changee)
+        self._tree.itemDoubleClicked.connect(self._arbre_double_clic)
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._menu_arbre)
+        v.addWidget(self._tree, 1)
+
+        pied = QFrame()
+        pied.setObjectName("sideFooter")
+        ph = QVBoxLayout(pied)
+        ph.setContentsMargins(10, 10, 10, 10)
+        self._btn_add = QPushButton(icon("plus"), " Ajouter une caméra")
+        self._btn_add.setObjectName("addBtn")
+        self._btn_add.clicked.connect(self._ouvrir_configuration)
+        self._icon_widgets.append((self._btn_add, "plus"))
+        ph.addWidget(self._btn_add)
+        v.addWidget(pied)
+
+        self._sidebar = panel
+        return panel
+
+    # ------------------------------------------------------------------ mur d'images
+
+    def _build_stage(self) -> QWidget:
+        self._grid_page = QWidget()
+        self._grid_layout = QGridLayout(self._grid_page)
+        self._grid_layout.setContentsMargins(3, 3, 3, 3)
+        self._grid_layout.setSpacing(3)
+
+        self._placeholder = QLabel()
+        self._placeholder.setAlignment(Qt.AlignCenter)
+
+        self._mono_page = QWidget()
+        self._mono_layout = QVBoxLayout(self._mono_page)
+        self._mono_layout.setContentsMargins(3, 3, 3, 3)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._grid_page)
+        self._stack.addWidget(self._mono_page)
+        return self._stack
+
+    def _init_timers(self):
 
         # regroupe les changements de coches (cocher un site = N items)
         self._rebuild_timer = QTimer(self)
@@ -234,6 +291,61 @@ class MainWindow(QMainWindow):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(1200)
         self._save_timer.timeout.connect(lambda: save_config(self._cfg))
+
+    def _tbtn(self, nom_icone: str, texte: str, tooltip: str, slot,
+              checkable: bool = False) -> QToolButton:
+        """Bouton plat de la barre de titre (icône + texte)."""
+        b = QToolButton()
+        b.setIcon(icon(nom_icone))
+        if texte:
+            b.setText(texte)
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        else:
+            b.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        b.setToolTip(tooltip)
+        b.setCheckable(checkable)
+        b.setIconSize(QSize(18, 18))
+        if checkable:
+            b.toggled.connect(slot)
+        else:
+            b.clicked.connect(lambda _=False: slot())
+        self._icon_widgets.append((b, nom_icone))
+        return b
+
+    def _sep(self) -> QFrame:
+        s = QFrame()
+        s.setObjectName("vsep")
+        s.setFrameShape(QFrame.VLine)
+        s.setFixedWidth(1)
+        return s
+
+    def _apply_theme_chrome(self):
+        """Applique les couleurs du thème aux zones qui entourent la vidéo."""
+        from .theme import t
+        fond = f"background-color: {t('video_bg')};"
+        self._grid_page.setStyleSheet(fond)
+        self._mono_page.setStyleSheet(fond)
+        self._placeholder.setStyleSheet(f"color: {t('text_dim')}; font-size: 14px;")
+
+    def _all_tiles(self) -> list:
+        if self._mono_tile is not None:
+            return [self._mono_tile]
+        return list(self._tiles.values())
+
+    def _restyle_all(self):
+        """Réapplique le thème courant à l'habillage et aux tuiles (sans couper
+        les flux). Appelé après un changement de thème dans la configuration."""
+        from .theme import t
+        self._apply_theme_chrome()
+        for widget, nom in self._icon_widgets:
+            if nom == "play" and widget is self._act_seq:
+                nom = "stop" if widget.isChecked() else "play"
+            elif nom == "pause" and widget is self._act_pause:
+                nom = "play" if widget.isChecked() else "pause"
+            widget.setIcon(icon(nom, t("text")))
+        for tile in self._all_tiles():
+            if hasattr(tile, "restyle"):
+                tile.restyle()
 
     # ----------------------------------------------------------- configuration
 
@@ -256,6 +368,7 @@ class MainWindow(QMainWindow):
 
         self._peupler_arbre()
         self._peupler_sequences()
+        self._maj_visibilite_mouvement()
         self._selection_appliquee()
 
         if cfg.warnings:
@@ -279,6 +392,8 @@ class MainWindow(QMainWindow):
             self._load_config()          # annulé → on repart du fichier
         elif etait_en_seq:
             self._update_status()
+        # le thème a pu changer : réaligner l'habillage et les tuiles existantes
+        self._restyle_all()
 
     def _editer_sequences(self):
         self._seq_stop()
@@ -313,6 +428,22 @@ class MainWindow(QMainWindow):
             self._tree.addTopLevelItem(site_item)
         self._tree.expandAll()
         self._tree.blockSignals(False)
+        n = len(self._cfg.cameras)
+        self._side_count.setText(str(n) if n else "")
+
+    def _a_camera_onvif(self) -> bool:
+        return any(c.marque == "onvif" for c in self._cfg.cameras)
+
+    def _maj_visibilite_mouvement(self):
+        """La détection de mouvement passe par ONVIF : on n'affiche ses commandes
+        que si au moins une caméra ONVIF est configurée."""
+        visible = self._a_camera_onvif()
+        self._motion_box.setVisible(visible)
+        if not visible:
+            if self._act_motion_auto.isChecked():
+                self._act_motion_auto.setChecked(False)
+            if self._act_motion.isChecked():
+                self._act_motion.setChecked(False)
 
     def _peupler_sequences(self):
         self._seq_combo.clear()
@@ -378,19 +509,11 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------------- grille
 
     def _make_tile(self, cam, vue: str):
-        niveau = self._enhance_niveau(cam)
-        if niveau == "rt":
-            # reconstruction neuronale temps réel — en grille, entrée réduite
-            # (« fluide ») car les tuiles se partagent le débit du GPU
-            from .neural_tile import NeuralTile
-            from ..neural import CIBLE_DEFAUT
-            tile = NeuralTile(cam, vue,
-                              cible="fluide" if vue == "grille" else CIBLE_DEFAUT)
-        elif vue == "grille" and cam.profil == "eco-extreme":
+        # profil « photo » en grille : image HTTP périodique (sites 4G contraints)
+        if vue == "grille" and cam.profil == "eco-extreme":
             tile = PhotoTile(cam, vue)
         else:
             tile = VideoTile(cam, vue)
-            tile.set_enhance(niveau)
         tile.double_clicked.connect(self._tuile_double_clic)
         tile.state_changed.connect(self._update_status)
         tile.snapshot_saved.connect(
@@ -398,70 +521,6 @@ class MainWindow(QMainWindow):
         if cam.id in self._motion_ids and hasattr(tile, "set_motion"):
             tile.set_motion(True)
         return tile
-
-    def _enhance_niveau(self, cam) -> str:
-        """Niveau d'amélioration effectif : override global sinon réglage caméra."""
-        return cam.amelioration if self._enhance_override == "auto" else self._enhance_override
-
-    def _enhance_change(self):
-        ancien = self._enhance_override
-        self._enhance_override = self._enh_combo.currentData()
-        for tile in self._all_video_tiles():
-            tile.set_enhance(self._enhance_niveau(tile.camera))
-        # « Temps réel IA » change le TYPE des tuiles → reconstruire les vues
-        from .neural_tile import NeuralTile
-        if self._mono_tile is not None:
-            veut_neural = (self._enhance_niveau(self._mono_tile.camera) == "rt")
-            est_neural = isinstance(self._mono_tile, NeuralTile)
-            if veut_neural != est_neural:
-                self._set_mono(self._mono_tile.camera.id)
-        if "rt" in (ancien, self._enhance_override) and ancien != self._enhance_override:
-            # grille : les tuiles existantes changent de type → tout recréer
-            self._vider_grille()
-            self._selection_appliquee()
-        if self._enhance_override == "rt":
-            from ..neural import disponible
-            if not disponible():
-                self.statusBar().showMessage(
-                    "Moteur de reconstruction non installé : clic droit sur une caméra, "
-                    "puis « Reconstruire l'image ».", 8000)
-            elif len(self._tiles) > 1:
-                self.statusBar().showMessage(
-                    f"Reconstruction sur {len(self._tiles)} caméras : la fluidité "
-                    "diminue avec le nombre de caméras affichées.", 8000)
-
-    def _all_video_tiles(self):
-        cibles = ([self._mono_tile] if self._mono_tile is not None
-                  else list(self._tiles.values()))
-        return [t for t in cibles if isinstance(t, VideoTile)]
-
-    def _telecharger_fsrcnnx(self):
-        from ..enhance import fsrcnnx_present
-        if fsrcnnx_present():
-            QMessageBox.information(self, "Moteur de netteté",
-                                    "Le moteur est déjà installé.")
-            return
-        if QMessageBox.question(
-                self, "Moteur de netteté",
-                "Télécharger le moteur de netteté FSRCNNX (70 Ko) ?"
-        ) != QMessageBox.Yes:
-            return
-        self.statusBar().showMessage("Téléchargement…")
-        import threading
-        def work():
-            from ..enhance import download_fsrcnnx
-            ok, msg = download_fsrcnnx()
-            self._fsrcnnx_fini.emit(ok, msg)
-        threading.Thread(target=work, daemon=True, name="dl-fsrcnnx").start()
-
-    def _on_fsrcnnx_fini(self, ok: bool, msg: str):
-        if ok:
-            self.statusBar().showMessage("Moteur de netteté installé.", 5000)
-            for tile in self._all_video_tiles():
-                tile.set_enhance(self._enhance_niveau(tile.camera))
-        else:
-            QMessageBox.warning(self, "Moteur de netteté",
-                                f"Téléchargement impossible : {msg}")
 
     def _vider_grille(self):
         for tile in self._tiles.values():
@@ -510,13 +569,13 @@ class MainWindow(QMainWindow):
         ordered = [self._tiles[cid] for cid in ids if cid in self._tiles]
         if not ordered:
             if self._act_motion_auto.isChecked():
-                txt = "Vue mouvement active.\nEn attente de mouvement sur une caméra…"
+                txt = "Vue mouvement active — en attente d'activité sur une caméra…"
             elif not self._cfg.cameras:
                 txt = ("Aucune caméra configurée.\n"
-                       "Ouvrez la configuration pour ajouter vos sites et vos DVR.")
+                       "Ouvrez la Configuration pour ajouter vos sites et vos DVR.")
             else:
-                txt = ("Cochez des caméras dans le panneau de gauche.\n"
-                       "Double-clic : plein écran. Clic droit : options.")
+                txt = ("Sélectionnez des caméras dans le panneau de gauche.\n"
+                       "Double-clic : plein écran   ·   Clic droit : options")
             self._placeholder.setText(txt)
             self._grid_layout.addWidget(self._placeholder, 0, 0)
         else:
@@ -700,7 +759,7 @@ class MainWindow(QMainWindow):
 
     def _seq_basculee(self, active: bool):
         self._act_seq.setIcon(icon("stop") if active else icon("play"))
-        self._act_seq.setText("Arrêter" if active else "Jouer")
+        self._act_seq.setText("Arrêter" if active else "Lire")
         if active:
             i = self._seq_combo.currentIndex()
             if not (0 <= i < len(self._cfg.sequences)):
@@ -724,7 +783,7 @@ class MainWindow(QMainWindow):
             self._act_seq.setChecked(False)
             self._act_seq.blockSignals(False)
         self._act_seq.setIcon(icon("play"))
-        self._act_seq.setText("Jouer")
+        self._act_seq.setText("Lire")
         # retour à l'affichage piloté par la sélection
         if self._stack.currentWidget() is self._mono_page:
             self._go_grid()
@@ -830,14 +889,18 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _=False, e=ecran: self._fullscreen_sur(e))
 
     def _fullscreen_sur(self, ecran):
-        self._dock.hide()
+        self._topbar.hide()
+        self._sidebar.hide()
+        self.statusBar().hide()
         self.setGeometry(ecran.geometry())
         self.showFullScreen()
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
             self.showNormal()
-            self._dock.show()
+            self._topbar.show()
+            self._sidebar.show()
+            self.statusBar().show()
         else:
             self._fullscreen_sur(self.screen())
 

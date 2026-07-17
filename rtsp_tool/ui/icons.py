@@ -53,7 +53,6 @@ _PATHS = {
 
 _FILLED = {"play", "stop", "pause"}
 
-_DEFAUT = "#d0d0d0"
 _SIZES = (16, 20, 24, 32, 48)
 
 
@@ -69,7 +68,7 @@ def _svg(name: str, color: str, size: int) -> bytes:
 
 
 @lru_cache(maxsize=None)
-def icon(name: str, color: str = _DEFAUT) -> QIcon:
+def _icon_cached(name: str, color: str) -> QIcon:
     ic = QIcon()
     for size in _SIZES:
         pix = QPixmap()
@@ -77,6 +76,14 @@ def icon(name: str, color: str = _DEFAUT) -> QIcon:
         if not pix.isNull():
             ic.addPixmap(pix)
     return ic
+
+
+def icon(name: str, color: str | None = None) -> QIcon:
+    """Icône SVG rendue dans la couleur du texte du thème courant par défaut."""
+    if color is None:
+        from .theme import t
+        color = t("text")
+    return _icon_cached(name, color)
 
 
 @lru_cache(maxsize=1)

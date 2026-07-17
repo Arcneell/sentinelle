@@ -9,8 +9,7 @@ python packaging/make_icon.py     # génère l'icône (une fois)
 pyinstaller --noconfirm --windowed --name Sentinelle --icon packaging/sentinelle.ico `
     --add-binary "lib\libmpv-2.dll;." `
     --add-data "rtsp_tool\ui\sentinelle.ico;rtsp_tool/ui" `
-    --add-data "rtsp_tool\ui\sentinelle.png;rtsp_tool/ui" `
-    --add-data "rtsp_tool\shaders;rtsp_tool/shaders" run.py
+    --add-data "rtsp_tool\ui\sentinelle.png;rtsp_tool/ui" run.py
 # -> dist\Sentinelle\  (déployer le dossier entier, pas seulement l'exe)
 ```
 

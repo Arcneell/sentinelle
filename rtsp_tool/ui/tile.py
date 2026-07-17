@@ -11,7 +11,6 @@ meurt n'affecte jamais les autres tuiles.
 """
 
 import logging
-import os
 import threading
 from collections import deque
 from datetime import datetime
@@ -80,7 +79,7 @@ class _VideoSurface(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DontCreateNativeAncestors)
         self.setAttribute(Qt.WA_NativeWindow)
-        self.setStyleSheet("background-color: black;")
+        self.setStyleSheet("background-color: #0a0b0d;")   # zone vidéo : toujours sombre
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
 
@@ -115,8 +114,9 @@ class VideoTile(QFrame):
         self._ptz_queue = None              # file FIFO : Stop suit toujours Move
         self._ptz_thread = None
         self._ptz_moving = False
-        self._enhance = camera.amelioration  # niveau d'amélioration d'image
         self._aspect_mode = "fit"            # fit | crop | stretch
+        self._motion_on = False              # surlignage « mouvement détecté »
+        self._controls = None
         self._log_tail = deque(maxlen=80)   # dernières lignes mpv pour diagnostic
 
         self._build_ui()
@@ -145,27 +145,22 @@ class VideoTile(QFrame):
 
     def _build_ui(self):
         self.setFrameShape(QFrame.StyledPanel)
-        self.setStyleSheet(
-            "VideoTile { background-color: #101010; border: 1px solid #303030; }")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        header = QWidget()
-        header.setStyleSheet("background-color: #1c1c1c;")
-        h = QHBoxLayout(header)
-        h.setContentsMargins(6, 2, 6, 2)
+        self._header = QWidget()
+        h = QHBoxLayout(self._header)
+        h.setContentsMargins(8, 4, 8, 4)
         self._dot = QLabel()
         self._dot.setFixedSize(10, 10)
         self._title = QLabel(f"{self.camera.nom} — {self.camera.site.nom}")
-        self._title.setStyleSheet("color: #d0d0d0; font-weight: bold;")
         self._flux_label = QLabel(self._flux_text())
-        self._flux_label.setStyleSheet("color: #707070;")
         h.addWidget(self._dot)
         h.addWidget(self._title)
         h.addStretch()
         h.addWidget(self._flux_label)
-        root.addWidget(header)
+        root.addWidget(self._header)
 
         body = QWidget()
         self._stack = QStackedLayout(body)
@@ -174,22 +169,44 @@ class VideoTile(QFrame):
         self._status = QLabel()
         self._status.setAlignment(Qt.AlignCenter)
         self._status.setWordWrap(True)
-        self._status.setStyleSheet(
-            "color: #a0a0a0; background-color: #101010; padding: 12px;")
         self._stack.addWidget(self._status)   # index 0
         self._stack.addWidget(self._video)    # index 1
         root.addWidget(body, 1)
 
         # barre de commandes (vue mono) : zoom numérique + PTZ si motorisée
         if self.vue == "mono":
-            root.addWidget(self._build_controls())
+            self._controls = self._build_controls()
+            root.addWidget(self._controls)
 
+        self.restyle()
         self._set_state(TileState.IDLE, "En attente")
+
+    def restyle(self):
+        """(Ré)applique les couleurs du thème courant sans couper le flux."""
+        from .theme import t
+        self._apply_frame_style()
+        self._header.setStyleSheet(f"background-color: {t('tile_header')};")
+        self._title.setStyleSheet(f"color: {t('text')}; font-weight: 600;")
+        self._flux_label.setStyleSheet(f"color: {t('text_dim')};")
+        self._status.setStyleSheet(
+            f"color: {t('tile_status_text')}; background-color: {t('video_bg')}; "
+            f"padding: 12px;")
+        self._dot.setStyleSheet(
+            f"background-color: {_DOT_COLORS[self.state]}; border-radius: 5px;")
+        if self._controls is not None:
+            self._controls.setStyleSheet(f"background-color: {t('tile_header')};")
+
+    def _apply_frame_style(self):
+        from .theme import t
+        couleur = t("danger") if self._motion_on else t("border")
+        largeur = 3 if self._motion_on else 1
+        self.setStyleSheet(
+            f"VideoTile {{ background-color: {t('tile_bg')}; "
+            f"border: {largeur}px solid {couleur}; }}")
 
     def _build_controls(self) -> QWidget:
         from .icons import icon
         bar = QWidget()
-        bar.setStyleSheet("background-color: #1c1c1c;")
         h = QHBoxLayout(bar)
         h.setContentsMargins(6, 3, 6, 3)
         h.setSpacing(4)
@@ -202,35 +219,36 @@ class VideoTile(QFrame):
                 ("↓", 0, -0.5, 0, "bas"), ("↘", 0.5, -0.5, 0, "bas-droite"),
             ):
                 b = QPushButton(libelle)
-                b.setFixedWidth(26)
-                b.setToolTip(f"PTZ {info} (maintenir)")
+                b.setObjectName("compact"); b.setFixedWidth(30)
+                b.setToolTip(f"Orientation {info} (maintenir enfoncé)")
                 b.pressed.connect(lambda x=dx, y=dy, z=dz: self._ptz(x, y, z))
                 b.released.connect(self._ptz_stop)
                 h.addWidget(b)
-            zin = QPushButton("Z+"); zin.setFixedWidth(30); zin.setToolTip("Zoom optique (maintenir)")
+            zin = QPushButton("Z+"); zin.setObjectName("compact"); zin.setFixedWidth(34)
+            zin.setToolTip("Zoom optique (maintenir enfoncé)")
             zin.pressed.connect(lambda: self._ptz(0, 0, 0.5)); zin.released.connect(self._ptz_stop)
-            zout = QPushButton("Z−"); zout.setFixedWidth(30); zout.setToolTip("Dézoom optique (maintenir)")
+            zout = QPushButton("Z−"); zout.setObjectName("compact"); zout.setFixedWidth(34)
+            zout.setToolTip("Dézoom optique (maintenir enfoncé)")
             zout.pressed.connect(lambda: self._ptz(0, 0, -0.5)); zout.released.connect(self._ptz_stop)
             h.addWidget(zin); h.addWidget(zout)
             h.addSpacing(10)
 
         h.addStretch()
-        h.addWidget(QLabel("Zoom num. :"))
+        lbl = QLabel("Zoom"); lbl.setObjectName("hint")
+        h.addWidget(lbl)
         for txt, fn, tip in (("＋", self.zoom_in, "Zoom numérique avant"),
                              ("－", self.zoom_out, "Zoom numérique arrière"),
                              ("⟳", self.zoom_reset, "Réinitialiser le zoom")):
-            b = QPushButton(txt); b.setFixedWidth(28); b.setToolTip(tip)
+            b = QPushButton(txt); b.setObjectName("compact"); b.setFixedWidth(32)
+            b.setToolTip(tip)
             b.clicked.connect(fn)
             h.addWidget(b)
         return bar
 
-    _ENH_BADGES = {"off": "", "leger": " · net", "sr": " · net+", "max": " · max"}
-
     def _flux_text(self) -> str:
         flux = self.camera.flux_pour_vue(self.vue)
         eco = " · éco" if self.camera.profil.startswith("eco") else ""
-        badge = self._ENH_BADGES.get(self._enhance, "")
-        return ("HD" if flux == "main" else "sub") + eco + badge
+        return ("HD" if flux == "main" else "sub") + eco
 
     def _set_state(self, state: TileState, message: str = ""):
         self.state = state
@@ -248,27 +266,14 @@ class VideoTile(QFrame):
         event.accept()
 
     def set_motion(self, actif: bool):
-        couleur = "#e04040" if actif else "#303030"
-        largeur = 3 if actif else 1
-        self.setStyleSheet(
-            f"VideoTile {{ background-color: #101010; "
-            f"border: {largeur}px solid {couleur}; }}")
+        self._motion_on = actif
+        self._apply_frame_style()
 
     def contextMenuEvent(self, event):
-        from ..enhance import NIVEAU_LABELS
         from .icons import icon
         menu = QMenu(self)
         act_snap = menu.addAction(icon("camera"), "Enregistrer une image")
         act_snap.setEnabled(self.state == TileState.PLAYING)
-        act_ia = menu.addAction(icon("search"), "Reconstruire l'image…")
-        act_ia.setEnabled(self.state == TileState.PLAYING)
-
-        sous = menu.addMenu("Amélioration d'image")
-        for niveau, libelle in NIVEAU_LABELS.items():
-            a = sous.addAction(libelle)
-            a.setCheckable(True)
-            a.setChecked(self._enhance == niveau)
-            a.triggered.connect(lambda _=False, n=niveau: self.set_enhance(n))
 
         remplir = menu.addMenu("Cadrage")
         for mode, libelle in (("fit", "Ajusté (défaut)"),
@@ -282,23 +287,6 @@ class VideoTile(QFrame):
         choix = menu.exec(event.globalPos())
         if choix is act_snap:
             self._save_snapshot()
-        elif choix is act_ia:
-            self._reconstruire_ia()
-
-    def _reconstruire_ia(self):
-        """Capture la frame courante et lance la reconstruction IA générative."""
-        if self._player is None or self.state != TileState.PLAYING:
-            return
-        import tempfile
-        fd, tmp = tempfile.mkstemp(suffix=".png", prefix="rtsp-tool-ia-")
-        os.close(fd)
-        try:
-            self._player.command("screenshot-to-file", tmp, "video")
-        except Exception as e:
-            logger.warning(f"[{self.camera.id}] capture IA impossible : {e}")
-            return
-        from .reconstruct_dialog import reconstruire_image
-        reconstruire_image(self.window(), self.camera, tmp)
 
     def set_aspect_mode(self, mode: str):
         self._aspect_mode = mode
@@ -326,19 +314,6 @@ class VideoTile(QFrame):
             self.snapshot_saved.emit(path)
         except Exception as e:
             logger.warning(f"[{self.camera.id}] capture impossible : {e}")
-
-    # ----------------------------------------------------- amélioration image
-
-    def set_enhance(self, niveau: str):
-        """Change le niveau d'amélioration à chaud (off/leger/sr/max)."""
-        self._enhance = niveau
-        self._flux_label.setText(self._flux_text())
-        if self.state == TileState.PLAYING:
-            self._apply_enhance()
-
-    def _apply_enhance(self):
-        from ..enhance import apply
-        apply(self._player, self._enhance, self.vue)
 
     # ------------------------------------------------------ zoom numérique
 
@@ -554,7 +529,6 @@ class VideoTile(QFrame):
         self._failures = 0
         self._set_state(TileState.PLAYING)
         self._debit_timer.start()
-        self._apply_enhance()
         if self._zoom:
             self._set_zoom(self._zoom)
         if self._aspect_mode != "fit":
