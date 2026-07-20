@@ -91,7 +91,7 @@ def app_icon() -> QIcon:
     """Icône de l'application (logo dédié, embarqué). Repli sur le glyphe vidéo."""
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
     for rel in ("ui/sentinelle.ico", "ui/sentinelle.png",
-                "rtsp_tool/ui/sentinelle.ico", "rtsp_tool/ui/sentinelle.png"):
+                "sentinelle/ui/sentinelle.ico", "sentinelle/ui/sentinelle.png"):
         p = base / rel
         if p.is_file():
             ic = QIcon(str(p))

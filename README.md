@@ -26,7 +26,6 @@ any ONVIF device through auto-discovery.
 - **ONVIF network discovery**: scan the LAN, pick the cameras, and their stream URLs
   (main + sub), snapshot URL and PTZ capability are resolved automatically.
 - **PTZ control** for motorised ONVIF cameras (pan/tilt/zoom pad in single view).
-- **Substream optimisation** in the DVR itself (see below).
 - **Digital zoom** and per-tile aspect mode (fit / crop / stretch); a **"test
   connection"** button when adding a camera.
 - Whole-DVR import: channels and their names are discovered over the Hikvision ISAPI, or
@@ -63,16 +62,6 @@ and an off-screen camera holds no connection.
 Rotation and sequences close the current streams before opening the next ones. RTSP runs
 over TCP. Substreams are rendered with mpv's `ewa_lanczossharp` scaler so they stay
 readable when enlarged — no extra processing, no external dependencies.
-
-## Substream optimisation (in the DVR)
-
-The biggest quality lever is the DVR encoder, not client-side processing. Many Dahua
-DVRs ship their substream as **MJPEG** at a low bitrate — every frame is a standalone,
-heavily-compressed JPEG, which is what produces the blocky look. In Configuration,
-select a Dahua camera or site → **"Optimiser le flux DVR"** switches the substream to
-**H.264** at the same bitrate. This transforms the image at the source, with no
-post-processing and no artificial look, and affects neither the main stream nor
-recording.
 
 ## Install
 
@@ -112,20 +101,19 @@ docker run --rm -v "${PWD}:/src" -w /src debian:12 bash packaging/build_deb.sh
 ## Architecture
 
 ```
-rtsp_tool/
+sentinelle/
 ├── config.py             Data model, brand URL templates, config.yaml read/write
 ├── probe.py              RTSP failure classification (auth / timeout / network)
 ├── snapshot.py           JPEG snapshots (ISAPI/CGI) and Hikvision channel discovery
 ├── onvif.py              ONVIF: WS-Discovery, stream/snapshot URIs, PTZ, motion events
 ├── motion.py             ONVIF motion monitor (per-camera event subscription threads)
-├── dvr_tune.py           Dahua substream optimisation (MJPEG -> H.264)
 ├── player.py             libmpv loading, RTSP settings, upscaling
 └── ui/
-    ├── theme.py          Light/dark themes + global flat stylesheet
+    ├── theme.py          Dark theme palette + global flat stylesheet
     ├── main_window.py    Title bar, camera sidebar, grid/single views, rotation, loops, motion
     ├── tile.py           Video tile: state machine, backoff, stop on 401, zoom, PTZ
     ├── photo_tile.py     Photo-mode tile (extreme-eco profile)
-    ├── config_dialogs.py Sites, cameras, whole-DVR import, ONVIF scan, DVR tuning, appearance
+    ├── config_dialogs.py Sites, cameras, whole-DVR import, ONVIF scan
     ├── sequence_editor.py Loop editor
     └── icons.py          SVG icons
 packaging/                .deb build, icon generation, deployment guide

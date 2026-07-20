@@ -1,7 +1,7 @@
-"""Point d'entrée : python -m rtsp_tool [--config chemin/config.yaml]
+"""Point d'entrée : python -m sentinelle [--config chemin/config.yaml]
 
 Sans argument, la configuration vit dans le profil utilisateur
-(%APPDATA%\\RTSP-TOOL\\config.yaml) et se gère entièrement dans l'interface.
+(%APPDATA%\\Sentinelle\\config.yaml) et se gère entièrement dans l'interface.
 Usage portable : --config .\\config.yaml à côté de l'exe.
 """
 

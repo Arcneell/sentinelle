@@ -5,7 +5,7 @@
 #   docker run --rm -v "${PWD}:/src" -w /src debian:12 bash packaging/build_deb.sh
 set -euo pipefail
 
-VERSION=$(grep -oP '__version__ = "\K[^"]+' rtsp_tool/__init__.py)
+VERSION=$(grep -oP '__version__ = "\K[^"]+' sentinelle/__init__.py)
 ARCH=amd64
 PKG=sentinelle_${VERSION}_${ARCH}
 
@@ -23,7 +23,7 @@ fi
 python3 -m venv /tmp/venv
 /tmp/venv/bin/pip install --quiet -r requirements.txt pyinstaller
 /tmp/venv/bin/pyinstaller --noconfirm --windowed --name sentinelle \
-    --add-data "rtsp_tool/ui/sentinelle.png:rtsp_tool/ui" \
+    --add-data "sentinelle/ui/sentinelle.png:sentinelle/ui" \
     --distpath /tmp/dist --workpath /tmp/build run.py
 
 # --- arborescence du paquet ---

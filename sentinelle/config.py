@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 # NB : c'est un brouillage local, pas du chiffrement — la clé est embarquée dans
 # l'app pour que la config reste déployable telle quelle sur chaque poste. Ça
 # empêche la lecture fortuite du fichier, pas un attaquant déterminé.
+# NE PAS MODIFIER : cette valeur historique déchiffre les mots de passe déjà
+# enregistrés dans les config.yaml existants. La changer les rendrait illisibles.
 _OBF_KEY = b"RTSP-TOOL.local.v1"
 
 
