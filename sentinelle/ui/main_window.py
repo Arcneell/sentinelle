@@ -110,22 +110,13 @@ class MainWindow(QMainWindow):
         return True
 
     def _deconnecter(self):
-        """Ferme la session : réaffiche la connexion ; si elle est abandonnée,
-        ferme l'application (pas d'état « déconnecté » exploitable)."""
+        """Se déconnecter ferme l'application (session serveur oubliée). Au
+        prochain lancement, la page de connexion sera redemandée."""
+        from PySide6.QtWidgets import QApplication
         self._settings.remove("serveur_user")
         self._settings.remove("serveur_pass")
-        if self._motion is not None:
-            if self._act_motion.isChecked():
-                self._act_motion.setChecked(False)
-            self._motion.stop()
-            self._motion = None
-        self._vider_grille()
-        self._remote = self._creer_remote()      # nouvel accès non authentifié
-        if self._assurer_session():
-            self._maj_bouton_admin()
-            self._load_config()
-        else:
-            self.close()                         # connexion abandonnée → on ferme
+        self.close()
+        QApplication.instance().quit()
 
     def _maj_bouton_admin(self):
         """Adapte l'interface aux droits : bouton Administration et pied latéral."""
@@ -776,7 +767,13 @@ class MainWindow(QMainWindow):
             if cam_id not in self._tiles:
                 tile = self._make_tile(self._cfg.camera(cam_id), vue)
                 self._tiles[cam_id] = tile
-                if not paused:
+
+        # (re)démarre toute tuile affichée à l'arrêt : une tuile conservée d'une
+        # étape précédente (ex. retour de vue mono dans une boucle) a été stoppée
+        # et doit repartir, sans reconnecter celles déjà en lecture.
+        if not paused:
+            for tile in self._tiles.values():
+                if tile.state == TileState.IDLE:
                     tile.start()
 
         for tile in self._tiles.values():
