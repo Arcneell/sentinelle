@@ -25,7 +25,6 @@ from ..config import (AppConfig, load_config, purger_cameras_sequences,
 from .config_dialogs import CameraDialog, ConfigDialog, DvrDialog, SiteDialog
 from .icons import app_icon, icon
 from .photo_tile import PhotoTile
-from .sequence_editor import SequenceEditor
 from .tile import TileState, VideoTile, format_debit
 
 logger = logging.getLogger(__name__)
@@ -38,6 +37,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, config_path: str):
         super().__init__()
+        self._config_path = config_path             # config locale (mode autonome)
         self._cfg = AppConfig(path=config_path)
         self._tiles: dict[str, QWidget] = {}       # camera_id -> tuile (vidéo ou photo)
         self._mono_tile: VideoTile | None = None
@@ -45,18 +45,148 @@ class MainWindow(QMainWindow):
         self._page = 0
         self._seq = None                            # séquence en cours de lecture
         self._seq_idx = -1
-        self._motion = None                         # MotionMonitor (ONVIF)
+        self._motion = None                         # moniteur local ou écouteur serveur
         self._motion_ids = set()                    # caméras actuellement en mouvement
         self._icon_widgets = []                     # (widget, nom_icone) à recolorer
         self._settings = QSettings("Sentinelle", "viewer")
+        self._remote = self._creer_remote()         # None = mode autonome
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
+        self.setMinimumSize(1100, 640)      # la barre de commandes reste entière
         self.resize(1320, 820)
         self._build_ui()
+        # le mode est déjà choisi (assistant de premier lancement, cf. __main__)
+        self.demarrage_annule = not self._assurer_session()
+        if self.demarrage_annule:
+            return                       # connexion serveur abandonnée → on n'ouvre pas
+        self._maj_bouton_admin()
         self._load_config(initial=True)
 
-    # ------------------------------------------------------------------- UI
+    # ------------------------------------------------------------ mode serveur
+
+    def _creer_remote(self):
+        """Construit l'accès (non authentifié) au serveur si le mode le prévoit."""
+        if self._settings.value("mode", "local") != "serveur":
+            return None
+        url = self._settings.value("serveur_url", "", type=str).strip()
+        if not url:
+            return None
+        from ..remote import ServeurDistant
+        return ServeurDistant(url)
+
+    def _assurer_session(self) -> bool:
+        """Garantit une session serveur ouverte. Tente les identifiants mémorisés,
+        sinon demande une connexion. Retourne True si connecté."""
+        if self._remote is None or self._remote.connecte:
+            return True
+        from ..config import desobfusquer, obfusquer
+        from ..remote import ErreurServeur
+        # tentative silencieuse avec les identifiants mémorisés
+        user = self._settings.value("serveur_user", "", type=str)
+        mdp = desobfusquer(self._settings.value("serveur_pass", "", type=str))
+        if user and mdp:
+            try:
+                self._remote.login(user, mdp)
+                return True
+            except ErreurServeur:
+                pass
+        # connexion interactive
+        from .login_dialog import LoginDialog
+        dlg = LoginDialog(self._remote.base, user, self)
+        if not dlg.exec() or dlg.remote is None:
+            return False
+        self._remote = dlg.remote
+        infos = dlg.infos()
+        self._settings.setValue("serveur_url", infos["url"])
+        if infos["memoriser"]:
+            self._settings.setValue("serveur_user", infos["username"])
+            self._settings.setValue("serveur_pass", obfusquer(infos["password"]))
+        else:
+            self._settings.remove("serveur_user")
+            self._settings.remove("serveur_pass")
+        return True
+
+    def _deconnecter(self):
+        """Ferme la session : réaffiche la connexion ; si elle est abandonnée,
+        ferme l'application (pas d'état « déconnecté » exploitable)."""
+        self._settings.remove("serveur_user")
+        self._settings.remove("serveur_pass")
+        if self._motion is not None:
+            if self._act_motion.isChecked():
+                self._act_motion.setChecked(False)
+            self._motion.stop()
+            self._motion = None
+        self._vider_grille()
+        self._remote = self._creer_remote()      # nouvel accès non authentifié
+        if self._assurer_session():
+            self._maj_bouton_admin()
+            self._load_config()
+        else:
+            self.close()                         # connexion abandonnée → on ferme
+
+    def _maj_bouton_admin(self):
+        """Adapte l'interface aux droits : bouton Administration et pied latéral."""
+        est_admin = self._remote is not None and self._remote.connecte and self._remote.admin
+        self._act_admin.setVisible(est_admin)
+        # pied du panneau caméras : ajout local, gestion (admin) ou rien
+        if self._remote is None:
+            self._btn_add.setText(" Ajouter une caméra")
+            self._side_footer.setVisible(True)
+        elif est_admin:
+            self._btn_add.setText(" Gérer les caméras")
+            self._side_footer.setVisible(True)
+        else:
+            self._side_footer.setVisible(False)
+
+    def _action_pied_lateral(self):
+        if self._remote is None:
+            self._ouvrir_configuration()
+        else:
+            self._ouvrir_admin()
+
+    def _editer_sequences(self):
+        """Édition des boucles : locales (autonome) ou personnelles (serveur)."""
+        self._seq_stop()
+        from .sequence_editor import SequenceEditor
+        dlg = SequenceEditor(self._cfg, self)
+        accepte = dlg.exec()
+        if not dlg.modifie:
+            return
+        if not accepte:
+            self._load_config()              # annulé → on restaure
+            return
+        if self._remote is None:
+            save_config(self._cfg)
+            self._peupler_sequences()
+            return
+        from ..remote import ErreurServeur
+        try:
+            self._remote.pousser_boucles(self._cfg.sequences)
+            self._peupler_sequences()
+        except ErreurServeur as e:
+            QMessageBox.warning(self, "Boucles",
+                                f"Enregistrement impossible :\n{e}")
+            self._load_config()
+
+    def _ouvrir_admin(self):
+        if self._remote is None or not self._remote.admin:
+            return
+        from ..remote import ErreurServeur
+        try:
+            cfg_admin = self._remote.config_admin()
+        except ErreurServeur as e:
+            QMessageBox.warning(self, "Administration", f"Serveur injoignable :\n{e}")
+            return
+        from .admin_dialog import AdminDialog
+        dlg = AdminDialog(cfg_admin, self._remote, self)
+        dlg.exec()
+        if dlg.demande_mode == "local":
+            self._repasser_autonome()
+        elif dlg.demande_mode == "serveur":
+            self._basculer_vers_serveur()
+        elif dlg.recharger:
+            self._load_config()
 
     # ------------------------------------------------------------------- UI
     #
@@ -100,10 +230,10 @@ class MainWindow(QMainWindow):
     def _build_topbar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("topbar")
-        bar.setFixedHeight(56)
+        bar.setFixedHeight(52)
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(14, 0, 12, 0)
-        lay.setSpacing(8)
+        lay.setContentsMargins(10, 0, 8, 0)
+        lay.setSpacing(6)
 
         marque = QLabel(APP_NAME)
         marque.setObjectName("brand")
@@ -139,16 +269,18 @@ class MainWindow(QMainWindow):
 
         # boucles
         self._seq_combo = QComboBox()
-        self._seq_combo.setMinimumWidth(150)
+        self._seq_combo.setMinimumWidth(120)
+        self._seq_combo.setMaximumWidth(220)
         self._seq_combo.setToolTip("Boucle à lire")
         lay.addWidget(self._seq_combo)
         self._act_seq = self._tbtn("play", "Lire",
                                    "Lire ou arrêter la boucle sélectionnée",
                                    self._seq_basculee, checkable=True)
         lay.addWidget(self._act_seq)
-        self._btn_seq_edit = self._tbtn("pencil", "", "Créer et modifier les boucles",
-                                        self._editer_sequences)
-        lay.addWidget(self._btn_seq_edit)
+        self._btn_boucles = self._tbtn("pencil", "Boucles",
+                                       "Créer et modifier vos boucles",
+                                       self._editer_sequences)
+        lay.addWidget(self._btn_boucles)
 
         # détection de mouvement (masquée si aucune caméra ONVIF)
         self._motion_box = QWidget()
@@ -174,21 +306,30 @@ class MainWindow(QMainWindow):
                                      self._pause_basculee, checkable=True)
         lay.addWidget(self._act_pause)
 
-        self._btn_full = QToolButton()
-        self._btn_full.setIcon(icon("maximize"))
-        self._btn_full.setText("Plein écran")
-        self._btn_full.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._btn_full.setPopupMode(QToolButton.MenuButtonPopup)
-        self._btn_full.setToolTip("Plein écran (F11) — le menu permet de choisir l'écran")
-        self._btn_full.clicked.connect(self._toggle_fullscreen)
-        menu_full = QMenu(self._btn_full)
-        menu_full.aboutToShow.connect(lambda: self._peupler_menu_ecrans(menu_full))
-        self._btn_full.setMenu(menu_full)
-        self._icon_widgets.append((self._btn_full, "maximize"))
+        # plein écran : deux boutons distincts (action directe + choix de l'écran)
+        self._btn_full = self._tbtn("maximize", "Plein écran", "Plein écran (F11)",
+                                    self._toggle_fullscreen)
         lay.addWidget(self._btn_full)
 
+        self._btn_ecrans = QToolButton()
+        self._btn_ecrans.setIcon(icon("monitor"))
+        self._btn_ecrans.setIconSize(QSize(18, 18))
+        self._btn_ecrans.setToolTip("Plein écran sur un écran précis")
+        self._btn_ecrans.setPopupMode(QToolButton.InstantPopup)
+        menu_full = QMenu(self._btn_ecrans)
+        menu_full.aboutToShow.connect(lambda: self._peupler_menu_ecrans(menu_full))
+        self._btn_ecrans.setMenu(menu_full)
+        self._icon_widgets.append((self._btn_ecrans, "monitor"))
+        lay.addWidget(self._btn_ecrans)
+
+        self._act_admin = self._tbtn("lock", "Administration",
+                                     "Gérer le serveur : utilisateurs, caméras, réglages",
+                                     self._ouvrir_admin)
+        self._act_admin.setVisible(False)
+        lay.addWidget(self._act_admin)
+
         self._btn_cfg = self._tbtn("settings", "Configuration",
-                                   "Sites, caméras et réglages (Ctrl+,)",
+                                   "Préférences et réglages (Ctrl+,)",
                                    self._ouvrir_configuration)
         lay.addWidget(self._btn_cfg)
 
@@ -231,22 +372,25 @@ class MainWindow(QMainWindow):
         self._tree.setObjectName("cameraTree")
         self._tree.setHeaderHidden(True)
         self._tree.setIndentation(14)
+        # on coche, on ne « sélectionne » pas : pas de surbrillance persistante
+        self._tree.setSelectionMode(QTreeWidget.NoSelection)
+        self._tree.setFocusPolicy(Qt.NoFocus)
         self._tree.itemChanged.connect(self._coche_changee)
         self._tree.itemDoubleClicked.connect(self._arbre_double_clic)
         self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._menu_arbre)
         v.addWidget(self._tree, 1)
 
-        pied = QFrame()
-        pied.setObjectName("sideFooter")
-        ph = QVBoxLayout(pied)
+        self._side_footer = QFrame()
+        self._side_footer.setObjectName("sideFooter")
+        ph = QVBoxLayout(self._side_footer)
         ph.setContentsMargins(10, 10, 10, 10)
         self._btn_add = QPushButton(icon("plus"), " Ajouter une caméra")
         self._btn_add.setObjectName("addBtn")
-        self._btn_add.clicked.connect(self._ouvrir_configuration)
+        self._btn_add.clicked.connect(self._action_pied_lateral)
         self._icon_widgets.append((self._btn_add, "plus"))
         ph.addWidget(self._btn_add)
-        v.addWidget(pied)
+        v.addWidget(self._side_footer)
 
         self._sidebar = panel
         return panel
@@ -350,12 +494,33 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------- configuration
 
     def _load_config(self, initial: bool = False):
-        try:
-            cfg = load_config(self._cfg.path)
-        except Exception as e:
-            QMessageBox.critical(self, "Configuration", str(e))
-            return
+        if self._remote is not None:
+            from ..remote import ErreurServeur, JetonInvalide
+            try:
+                cfg = self._remote.config_vue()
+            except JetonInvalide:
+                # session expirée (mot de passe changé, serveur redémarré…)
+                self._remote.jeton = ""
+                if self._assurer_session():
+                    return self._load_config(initial)
+                cfg = AppConfig(path="")
+            except ErreurServeur as e:
+                cfg = AppConfig(path="")
+                QMessageBox.warning(
+                    self, "Serveur",
+                    f"Connexion au serveur impossible :\n{e}\n\n"
+                    "Vérifiez l'adresse et reconnectez-vous dans la Configuration.")
+            except Exception as e:
+                cfg = AppConfig(path="")
+                QMessageBox.warning(self, "Serveur", f"Erreur inattendue : {e}")
+        else:
+            try:
+                cfg = load_config(self._config_path)
+            except Exception as e:
+                QMessageBox.critical(self, "Configuration", str(e))
+                return
 
+        self.statusBar().clearMessage()      # efface un éventuel message persistant
         self._seq_stop()
         self._leave_mono()
         self._vider_grille()
@@ -376,34 +541,90 @@ class MainWindow(QMainWindow):
                 self, "Configuration — avertissements",
                 "\n".join(cfg.warnings[:20]) + ("\n…" if len(cfg.warnings) > 20 else ""))
 
-        if initial and not cfg.cameras:
-            # premier lancement : on ouvre directement la configuration
+        if initial and self._remote is None and not cfg.cameras:
+            # premier lancement en mode autonome : ouvrir la configuration
             QTimer.singleShot(200, self._ouvrir_configuration)
 
     def _ouvrir_configuration(self):
         etait_en_seq = self._seq is not None
         self._seq_stop()
-        dlg = ConfigDialog(self._cfg, self)
-        accepte = dlg.exec()
-        if accepte and dlg.modifie:
-            save_config(self._cfg)
-            self._load_config()
-        elif not accepte and dlg.modifie:
-            self._load_config()          # annulé → on repart du fichier
+
+        if self._remote is None:
+            # mode autonome : configuration locale complète
+            dlg = ConfigDialog(self._cfg, self)
+            code = dlg.exec()
+            if dlg.demande_serveur:
+                if dlg.modifie:
+                    save_config(self._cfg)
+                self._basculer_vers_serveur()
+                return
+            if code and dlg.modifie:
+                save_config(self._cfg)
+                self._load_config()
+            elif not code and dlg.modifie:
+                self._load_config()          # annulé → on repart du fichier
+            elif etait_en_seq:
+                self._update_status()
+            return
+
+        # mode serveur : préférences du poste (compte + déconnexion). La gestion
+        # serveur (dont le mode) est dans le panneau Administration.
+        from .config_dialogs import PreferencesDialog
+        dlg = PreferencesDialog(self._remote, self)
+        dlg.exec()
+        if dlg.deconnexion:
+            self._deconnecter()
         elif etait_en_seq:
             self._update_status()
-        # le thème a pu changer : réaligner l'habillage et les tuiles existantes
-        self._restyle_all()
 
-    def _editer_sequences(self):
-        self._seq_stop()
-        dlg = SequenceEditor(self._cfg, self)
-        accepte = dlg.exec()
-        if accepte and dlg.modifie:
-            save_config(self._cfg)
-            self._peupler_sequences()
-        elif not accepte and dlg.modifie:
-            self._load_config()
+    # ------------------------------------------------- bascule de mode (admin)
+
+    def _basculer_vers_serveur(self, url: str = ""):
+        """Passe le poste en mode serveur — exige un compte administrateur."""
+        from .login_dialog import LoginDialog
+        dlg = LoginDialog(url, "", self, url_editable=True)
+        dlg.setWindowTitle("Passer en mode serveur — connexion administrateur")
+        if not dlg.exec() or dlg.remote is None:
+            return
+        if not dlg.remote.admin:
+            QMessageBox.warning(
+                self, "Mode serveur",
+                "Un compte administrateur est nécessaire pour lier ce poste "
+                "à un serveur.")
+            return
+        infos = dlg.infos()
+        self._settings.setValue("mode", "serveur")
+        self._settings.setValue("serveur_url", infos["url"])
+        if infos["memoriser"]:
+            self._settings.setValue("serveur_user", infos["username"])
+            from ..config import obfusquer
+            self._settings.setValue("serveur_pass", obfusquer(infos["password"]))
+        else:
+            self._settings.remove("serveur_user")
+            self._settings.remove("serveur_pass")
+        self._remote = dlg.remote
+        self._maj_bouton_admin()
+        self._load_config()
+
+    def _repasser_autonome(self):
+        """Repasse le poste en mode autonome (déclenché par un admin)."""
+        if QMessageBox.question(
+                self, "Mode autonome",
+                "Repasser ce poste en mode autonome ?\n\n"
+                "Il n'utilisera plus le serveur ; sa configuration locale "
+                "(souvent vide) reprendra la main.") != QMessageBox.Yes:
+            return
+        self._settings.setValue("mode", "local")
+        self._settings.remove("serveur_user")
+        self._settings.remove("serveur_pass")
+        if self._act_motion.isChecked():
+            self._act_motion.setChecked(False)
+        if self._motion is not None:
+            self._motion.stop()
+            self._motion = None
+        self._remote = None
+        self._maj_bouton_admin()
+        self._load_config()
 
     def _peupler_arbre(self):
         cochees = set(self._settings.value("cameras_cochees", [], type=list))
@@ -432,7 +653,8 @@ class MainWindow(QMainWindow):
         self._side_count.setText(str(n) if n else "")
 
     def _a_camera_onvif(self) -> bool:
-        return any(c.marque == "onvif" for c in self._cfg.cameras)
+        return any(c.marque == "onvif" or getattr(c, "remote_onvif", False)
+                   for c in self._cfg.cameras)
 
     def _maj_visibilite_mouvement(self):
         """La détection de mouvement passe par ONVIF : on n'affiche ses commandes
@@ -571,8 +793,15 @@ class MainWindow(QMainWindow):
             if self._act_motion_auto.isChecked():
                 txt = "Vue mouvement active — en attente d'activité sur une caméra…"
             elif not self._cfg.cameras:
-                txt = ("Aucune caméra configurée.\n"
-                       "Ouvrez la Configuration pour ajouter vos sites et vos DVR.")
+                if self._remote is not None and not self._remote.connecte:
+                    txt = ("Non connecté au serveur.\n"
+                           "Ouvrez la Configuration pour vous connecter.")
+                elif self._remote is not None:
+                    txt = ("Aucune caméra ne vous est attribuée.\n"
+                           "Rapprochez-vous de votre administrateur.")
+                else:
+                    txt = ("Aucune caméra configurée.\n"
+                           "Ouvrez la Configuration pour ajouter vos sites et vos DVR.")
             else:
                 txt = ("Sélectionnez des caméras dans le panneau de gauche.\n"
                        "Double-clic : plein écran   ·   Clic droit : options")
@@ -648,6 +877,13 @@ class MainWindow(QMainWindow):
 
     def _menu_arbre(self, pos):
         """La configuration se modifie à tout moment, directement depuis l'arbre."""
+        if self._remote is not None:
+            # mode serveur : l'édition passe par la fenêtre Configuration
+            menu = QMenu(self)
+            menu.addAction(icon("settings"), "Configuration…",
+                           self._ouvrir_configuration)
+            menu.exec(self._tree.viewport().mapToGlobal(pos))
+            return
         item = self._tree.itemAt(pos)
         cam_id = item.data(0, Qt.UserRole) if item else None
         site_id = item.data(0, Qt.UserRole + 1) if item else None
@@ -732,7 +968,8 @@ class MainWindow(QMainWindow):
     def _rotation_duree_changee(self, val: int):
         self._cfg.rotation_duree_s = val
         self._rotation_timer.setInterval(val * 1000)
-        self._save_timer.start()          # enregistrement différé
+        if self._remote is None:
+            self._save_timer.start()      # enregistrement différé (mode autonome)
 
     def _rotation_tick(self):
         if self._seq is not None or self._act_pause.isChecked():
@@ -833,8 +1070,13 @@ class MainWindow(QMainWindow):
 
     def _motion_assurer(self):
         if self._motion is None:
-            from ..motion import MotionMonitor
-            self._motion = MotionMonitor(self)
+            if self._remote is not None:
+                # mode serveur : les événements arrivent du serveur (SSE)
+                from ..remote import EcouteurMouvement
+                self._motion = EcouteurMouvement(self._remote, self)
+            else:
+                from ..motion import MotionMonitor
+                self._motion = MotionMonitor(self)
             self._motion.motion_changed.connect(self._on_motion)
 
     def _motion_basculee(self, actif: bool):
@@ -939,7 +1181,8 @@ class MainWindow(QMainWindow):
             self._motion.stop()
         if self._save_timer.isActive():
             self._save_timer.stop()
-            save_config(self._cfg)
+            if self._remote is None:          # jamais la projection serveur
+                save_config(self._cfg)
         self._leave_mono()
         self._vider_grille()
         super().closeEvent(event)

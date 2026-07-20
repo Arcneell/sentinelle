@@ -27,6 +27,9 @@ dist/
 livraison/
 *.spec
 
+# Données du serveur (config centrale, jetons) — jamais publiées
+deploy/data/
+
 # Doc interne (non publiée)
 CADRAGE.md
 

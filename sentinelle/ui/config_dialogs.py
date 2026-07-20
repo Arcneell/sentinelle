@@ -66,18 +66,12 @@ class SiteDialog(QDialog):
         form.addRow("Nom du site :", self._nom)
         form.addRow("Type de lien :", self._lien)
 
-        info = QLabel("Sur un site 4G, les nouvelles caméras adoptent d'office le "
-                      "profil Éco (sous-flux partout) pour préserver la bande passante.")
-        info.setWordWrap(True)
-        info.setObjectName("hint")
-
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         boutons.accepted.connect(self._valider)
         boutons.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
         lay.addLayout(form)
-        lay.addWidget(info)
         lay.addWidget(boutons)
 
     def _valider(self):
@@ -713,28 +707,26 @@ class OnvifScanDialog(QDialog):
         self.accept()
 
 
-# ---------------------------------------------------------------- ConfigDialog
+# --------------------------------------------------------- CameraManagerWidget
 
-class ConfigDialog(QDialog):
-    """Gestionnaire de configuration : sites, caméras, DVR et réglages généraux."""
+class CameraManagerWidget(QWidget):
+    """Arbre sites/caméras + boutons d'ajout, édition, suppression.
+
+    Réutilisé par la Configuration en mode autonome et par le panneau
+    d'administration en mode serveur. Opère directement sur l'AppConfig fourni
+    et signale toute modification via l'attribut `modifie`."""
 
     def __init__(self, cfg: AppConfig, parent=None):
         super().__init__(parent)
         self._cfg = cfg
         self.modifie = False
-        self.setWindowTitle("Configuration")
-        self.setWindowIcon(icon("settings"))
-        self.setMinimumSize(720, 560)
 
-        # --- barre d'actions : ajouter ---
         btn_dvr = QPushButton(icon("plus"), " DVR complet")
         btn_dvr.setToolTip("Ajouter d'un coup toutes les caméras d'un enregistreur")
         btn_dvr.clicked.connect(self._ajouter_dvr)
         btn_cam = QPushButton(icon("plus"), " Caméra")
-        btn_cam.setToolTip("Ajouter une caméra")
         btn_cam.clicked.connect(self._ajouter_camera)
         btn_site = QPushButton(icon("plus"), " Site")
-        btn_site.setToolTip("Ajouter un site (un lieu)")
         btn_site.clicked.connect(self._ajouter_site)
         btn_onvif = QPushButton(icon("search"), " Recherche ONVIF")
         btn_onvif.setToolTip("Détecter les caméras ONVIF présentes sur le réseau")
@@ -745,14 +737,12 @@ class ConfigDialog(QDialog):
             barre.addWidget(b)
         barre.addStretch(1)
 
-        # --- arbre sites / caméras ---
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Sites et caméras", "Détails"])
         self._tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self._tree.itemDoubleClicked.connect(lambda *_: self._modifier())
         self._tree.itemSelectionChanged.connect(self._maj_boutons)
 
-        # --- édition de l'élément sélectionné ---
         self._btn_edit = QPushButton(icon("pencil"), " Modifier")
         self._btn_edit.clicked.connect(self._modifier)
         self._btn_del = QPushButton(icon("trash"), " Supprimer")
@@ -762,49 +752,22 @@ class ConfigDialog(QDialog):
         edition.addWidget(self._btn_edit)
         edition.addWidget(self._btn_del)
 
-        # --- réglages généraux ---
-        self._rot = QSpinBox()
-        self._rot.setRange(3, 3600)
-        self._rot.setSuffix(" s")
-        self._rot.setValue(cfg.rotation_duree_s)
-        reglages = QGroupBox("Réglages généraux")
-        rg = QFormLayout(reglages)
-        rg.setContentsMargins(12, 8, 12, 8)
-        rg.setHorizontalSpacing(18)
-        rg.setLabelAlignment(Qt.AlignLeft)
-        rg.addRow("Durée de rotation", self._rot)
-
-        note = QLabel("Conseil : utilisez de préférence un compte DVR en lecture seule.")
-        note.setWordWrap(True)
-        note.setObjectName("hint")
-
-        boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        boutons.button(QDialogButtonBox.Ok).setText("Enregistrer")
-        boutons.button(QDialogButtonBox.Cancel).setText("Annuler")
-        boutons.accepted.connect(self._terminer)
-        boutons.rejected.connect(self.reject)
-
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
         lay.addLayout(barre)
         lay.addWidget(self._tree, 1)
         lay.addLayout(edition)
-        lay.addWidget(reglages)
-        lay.addWidget(note)
-        lay.addWidget(boutons)
 
         self._maj_boutons()
-        self._rafraichir()
+        self.rafraichir()
 
     def _maj_boutons(self):
-        """Active Modifier / Supprimer seulement si un élément est sélectionné."""
         actif = self._selection() is not None
         self._btn_edit.setEnabled(actif)
         self._btn_del.setEnabled(actif)
 
-    # -------------------------------------------------------------- affichage
-
-    def _rafraichir(self):
+    def rafraichir(self):
         self._tree.clear()
         for site in self._cfg.sites:
             it = QTreeWidgetItem([site.nom, "site 4G" if site.lien == "4g" else "site fibre"])
@@ -819,7 +782,7 @@ class ConfigDialog(QDialog):
             self._tree.addTopLevelItem(it)
         self._tree.expandAll()
 
-    def _selection(self) -> tuple[str, str] | None:
+    def _selection(self):
         it = self._tree.currentItem()
         return it.data(0, Qt.UserRole) if it else None
 
@@ -832,13 +795,11 @@ class ConfigDialog(QDialog):
         cam = self._cfg.camera(sel[1])
         return cam.site if cam else None
 
-    # ---------------------------------------------------------------- actions
-
     def _exiger_site(self) -> bool:
         if self._cfg.sites:
             return True
         QMessageBox.information(self, "Configuration",
-                                "Commencez par créer un site (bouton « Site… »).")
+                                "Commencez par créer un site (bouton « Site »).")
         return False
 
     def _ajouter_site(self):
@@ -847,7 +808,7 @@ class ConfigDialog(QDialog):
             nom, lien = dlg.valeurs()
             self._cfg.sites.append(Site(id=self._cfg.unique_id(nom), nom=nom, lien=lien))
             self.modifie = True
-            self._rafraichir()
+            self.rafraichir()
 
     def _ajouter_dvr(self):
         if not self._exiger_site():
@@ -855,7 +816,7 @@ class ConfigDialog(QDialog):
         dlg = DvrDialog(self._cfg, self, site_defaut=self._site_selectionne())
         if dlg.exec():
             self.modifie = True
-            self._rafraichir()
+            self.rafraichir()
 
     def _scan_onvif(self):
         if not self._exiger_site():
@@ -863,7 +824,7 @@ class ConfigDialog(QDialog):
         dlg = OnvifScanDialog(self._cfg, self, site_defaut=self._site_selectionne())
         if dlg.exec() and dlg.cameras_creees:
             self.modifie = True
-            self._rafraichir()
+            self.rafraichir()
 
     def _ajouter_camera(self):
         if not self._exiger_site():
@@ -872,7 +833,7 @@ class ConfigDialog(QDialog):
         if dlg.exec():
             dlg.appliquer()
             self.modifie = True
-            self._rafraichir()
+            self.rafraichir()
 
     def _modifier(self):
         sel = self._selection()
@@ -885,14 +846,14 @@ class ConfigDialog(QDialog):
             if dlg.exec():
                 site.nom, site.lien = dlg.valeurs()
                 self.modifie = True
-                self._rafraichir()
+                self.rafraichir()
         else:
             cam = self._cfg.camera(ident)
             dlg = CameraDialog(self._cfg, self, camera=cam)
             if dlg.exec():
                 dlg.appliquer()
                 self.modifie = True
-                self._rafraichir()
+                self.rafraichir()
 
     def _supprimer(self):
         sel = self._selection()
@@ -919,10 +880,142 @@ class ConfigDialog(QDialog):
             self._cfg.cameras = [c for c in self._cfg.cameras if c.id != ident]
             purger_cameras_sequences(self._cfg, {ident})
         self.modifie = True
-        self._rafraichir()
+        self.rafraichir()
+
+
+# ---------------------------------------------------------------- ConfigDialog
+
+class ConfigDialog(QDialog):
+    """Configuration en mode autonome : caméras et réglages du poste.
+
+    Le passage en mode serveur est protégé : il exige la connexion d'un compte
+    administrateur (voir la fenêtre principale)."""
+
+    def __init__(self, cfg: AppConfig, parent=None):
+        super().__init__(parent)
+        self._cfg = cfg
+        self.modifie = False
+        self.demande_serveur = False          # l'utilisateur veut passer en serveur
+        self.setWindowTitle("Configuration")
+        self.setWindowIcon(icon("settings"))
+        self.setMinimumSize(720, 600)
+
+        self._manager = CameraManagerWidget(cfg, self)
+
+        self._rot = QSpinBox()
+        self._rot.setRange(3, 3600)
+        self._rot.setSuffix(" s")
+        self._rot.setValue(cfg.rotation_duree_s)
+        reglages = QGroupBox("Réglages généraux")
+        rg = QFormLayout(reglages)
+        rg.setContentsMargins(12, 8, 12, 8)
+        rg.setHorizontalSpacing(18)
+        rg.setLabelAlignment(Qt.AlignLeft)
+        rg.addRow("Durée de rotation", self._rot)
+
+        # mode de fonctionnement (verrouillé : bascule réservée à un admin)
+        mode = QGroupBox("Mode de fonctionnement")
+        ml = QVBoxLayout(mode)
+        ml.setContentsMargins(12, 8, 12, 8)
+        btn_srv = QPushButton(icon("lock"), " Passer en mode serveur…")
+        btn_srv.setToolTip("Nécessite un compte administrateur du serveur")
+        btn_srv.clicked.connect(self._demander_serveur)
+        ml.addWidget(btn_srv)
+
+        boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        boutons.button(QDialogButtonBox.Ok).setText("Enregistrer")
+        boutons.button(QDialogButtonBox.Cancel).setText("Annuler")
+        boutons.accepted.connect(self._terminer)
+        boutons.rejected.connect(self.reject)
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+        lay.addWidget(self._manager, 1)
+        lay.addWidget(reglages)
+        lay.addWidget(mode)
+        lay.addWidget(boutons)
+
+    def _demander_serveur(self):
+        # la bascule elle-même (login admin) est gérée par la fenêtre principale
+        self.demande_serveur = True
+        self.done(2)                          # code distinct de Ok/Cancel
 
     def _terminer(self):
         if self._rot.value() != self._cfg.rotation_duree_s:
             self._cfg.rotation_duree_s = self._rot.value()
             self.modifie = True
+        if self._manager.modifie:
+            self.modifie = True
+        self.accept()
+
+
+# ------------------------------------------------------------ PreferencesDialog
+
+class PreferencesDialog(QDialog):
+    """Préférences d'un poste connecté à un serveur : compte + déconnexion.
+
+    La gestion du serveur (caméras, utilisateurs, mode) se fait dans le panneau
+    d'administration, réservé aux comptes admin. Les boucles se modifient depuis
+    le bouton « Boucles » de la barre du haut."""
+
+    def __init__(self, remote, parent=None):
+        super().__init__(parent)
+        self._remote = remote
+        self.deconnexion = False
+        self.setWindowTitle("Configuration")
+        self.setWindowIcon(icon("settings"))
+        self.setMinimumWidth(460)
+
+        compte = QGroupBox("Mon compte")
+        cf = QFormLayout(compte)
+        cf.setContentsMargins(12, 8, 12, 8)
+        cf.setHorizontalSpacing(18)
+        role = "administrateur" if remote.admin else "utilisateur"
+        cf.addRow("Connecté en tant que", QLabel(f"{remote.username} ({role})"))
+        self._mdp_ancien = QLineEdit(); self._mdp_ancien.setEchoMode(QLineEdit.Password)
+        self._mdp_nouv = QLineEdit(); self._mdp_nouv.setEchoMode(QLineEdit.Password)
+        self._mdp_conf = QLineEdit(); self._mdp_conf.setEchoMode(QLineEdit.Password)
+        cf.addRow("Mot de passe actuel", self._mdp_ancien)
+        cf.addRow("Nouveau mot de passe", self._mdp_nouv)
+        cf.addRow("Confirmer", self._mdp_conf)
+        btn_mdp = QPushButton("Changer mon mot de passe")
+        btn_mdp.clicked.connect(self._changer_mdp)
+        cf.addRow("", btn_mdp)
+
+        btn_logout = QPushButton(icon("lock"), " Se déconnecter")
+        btn_logout.clicked.connect(self._se_deconnecter)
+
+        boutons = QDialogButtonBox(QDialogButtonBox.Close)
+        boutons.button(QDialogButtonBox.Close).setText("Fermer")
+        boutons.rejected.connect(self.reject)
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+        lay.addWidget(compte)
+        lay.addWidget(btn_logout)
+        lay.addStretch(1)
+        lay.addWidget(boutons)
+
+    def _changer_mdp(self):
+        from ..remote import ErreurServeur
+        ancien = self._mdp_ancien.text()
+        nouveau = self._mdp_nouv.text()
+        if len(nouveau) < 4:
+            QMessageBox.warning(self, "Mot de passe",
+                                "Le nouveau mot de passe doit faire au moins 4 caractères.")
+            return
+        if nouveau != self._mdp_conf.text():
+            QMessageBox.warning(self, "Mot de passe", "La confirmation ne correspond pas.")
+            return
+        try:
+            self._remote.changer_mot_de_passe(ancien, nouveau)
+        except ErreurServeur as e:
+            QMessageBox.warning(self, "Mot de passe", f"Échec : {e}")
+            return
+        for champ in (self._mdp_ancien, self._mdp_nouv, self._mdp_conf):
+            champ.clear()
+        QMessageBox.information(self, "Mot de passe", "Mot de passe modifié.")
+
+    def _se_deconnecter(self):
+        self.deconnexion = True
         self.accept()
