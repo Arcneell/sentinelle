@@ -37,26 +37,27 @@ def mpv_disponible() -> bool:
 
 def create_player(wid: int, log_handler=None):
     """Instance mpv embarquée dans le widget natif `wid`, réglée pour du RTSP
-    basse latence avec un upscaling soigné des substreams."""
+    basse latence avec un upscaling soigné des substreams.
+
+    Sortie vidéo overridable par l'environnement pour les pilotes GPU fragiles
+    (cf. --safe-video) : SENTINELLE_MPV_VO / SENTINELLE_MPV_HWDEC. En mode sûr
+    (vo=x11, hwdec=no), on n'active PAS les scalers GPU (ignorés sans OpenGL,
+    et sources de crash sur certains pilotes)."""
     if mpv is None:
         raise RuntimeError(f"libmpv indisponible : {MPV_IMPORT_ERROR}")
-    return mpv.MPV(
+
+    vo = os.environ.get("SENTINELLE_MPV_VO", "gpu")
+    hwdec = os.environ.get("SENTINELLE_MPV_HWDEC", "auto-safe")
+
+    opts = dict(
         wid=str(int(wid)),
         log_handler=log_handler,
         rtsp_transport="tcp",
         network_timeout=15,
         profile="low-latency",
-        vo="gpu",
-        hwdec="auto-safe",
+        vo=vo,
+        hwdec=hwdec,
         keepaspect=True,
-        # Upscaling : rend un substream basse résolution nettement plus net une
-        # fois étiré sur une grande tuile (scaler à lobes elliptiques + sigmoïde
-        # anti-halo + deband pour effacer le blocking JPEG/H.264).
-        scale="ewa_lanczossharp",
-        cscale="ewa_lanczossharp",
-        dscale="mitchell",
-        sigmoid_upscaling=True,
-        deband=True,
         audio="no",
         osc=False,
         osd_level=0,
@@ -64,3 +65,16 @@ def create_player(wid: int, log_handler=None):
         input_vo_keyboard=False,
         input_cursor=False,
     )
+    if vo == "gpu":
+        # Upscaling : rend un substream basse résolution nettement plus net une
+        # fois étiré sur une grande tuile (scaler à lobes elliptiques + sigmoïde
+        # anti-halo + deband pour effacer le blocking JPEG/H.264). Réservé au vo
+        # GPU (OpenGL) ; inutile/ignoré avec une sortie logicielle.
+        opts.update(
+            scale="ewa_lanczossharp",
+            cscale="ewa_lanczossharp",
+            dscale="mitchell",
+            sigmoid_upscaling=True,
+            deband=True,
+        )
+    return mpv.MPV(**opts)

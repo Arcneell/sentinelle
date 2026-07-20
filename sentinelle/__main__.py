@@ -20,6 +20,10 @@ def main() -> int:
                         help="chemin du fichier de configuration (défaut : profil utilisateur)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="journalisation détaillée (niveau DEBUG)")
+    parser.add_argument("--safe-video", action="store_true",
+                        help="sortie vidéo logicielle (vo=x11, sans OpenGL) — "
+                             "à utiliser si l'affichage vidéo fait planter le "
+                             "système (pilote GPU fragile)")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -27,6 +31,13 @@ def main() -> int:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    if args.safe_video:
+        # sortie logicielle : évite le chemin OpenGL de mpv, qui peut faire
+        # tomber le serveur d'affichage sur certains pilotes GPU Linux.
+        os.environ.setdefault("SENTINELLE_MPV_VO", "x11")
+        os.environ.setdefault("SENTINELLE_MPV_HWDEC", "no")
+        logging.getLogger("sentinelle").info("Mode vidéo sûr : vo=x11, hwdec=no")
 
     migrer_ancien_dossier()          # reprend les données de l'ancien nom si présent
 

@@ -308,8 +308,17 @@ def load_config(path: str) -> AppConfig:
         logger.info(f"Pas de config existante ({path}) — démarrage vide")
         return cfg
 
-    with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("racine YAML inattendue")
+    except (OSError, yaml.YAMLError, ValueError) as e:
+        # config illisible/corrompue (ex. écriture interrompue par un crash) :
+        # on n'empêche jamais l'ouverture — on repart vide en le signalant.
+        logger.error(f"Config illisible ({path}) : {e} — démarrage vide")
+        cfg.warnings.append(f"Config illisible ({e}) — repartie de zéro")
+        return cfg
 
     options = raw.get("options") or {}
     try:
@@ -421,5 +430,7 @@ def save_config(cfg: AppConfig):
     with open(tmp, "w", encoding="utf-8") as f:
         f.write("# Sentinelle — fichier géré par l'application (fenêtre Configuration).\n")
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        f.flush()
+        os.fsync(f.fileno())          # forcer l'écriture disque avant le remplacement
     os.replace(tmp, cfg.path)
     logger.info(f"Config enregistrée : {cfg.path}")
