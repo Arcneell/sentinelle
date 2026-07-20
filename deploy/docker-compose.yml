@@ -1,0 +1,33 @@
+# Sentinelle Server — API + relais vidéo.
+#
+# Démarrage :   docker compose up -d --build
+# Jetons :      ./data/server.yaml (générés au premier démarrage)
+# Amorçage :    déposer un config.yaml (format du client) dans ./data/
+#
+# Ports exposés aux clients :
+#   8080/tcp : API (configuration, snapshots, PTZ, événements)
+#   8554/tcp : flux vidéo (RTSP, lecture authentifiée)
+
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:1
+    restart: unless-stopped
+    ports:
+      - "8554:8554"
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - SENTINELLE_DATA=/data
+      - MEDIAMTX_API=http://mediamtx:9997
+    volumes:
+      - ./data:/data
+    depends_on:
+      - mediamtx

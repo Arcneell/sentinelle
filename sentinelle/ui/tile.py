@@ -349,14 +349,32 @@ class VideoTile(QFrame):
         if self._ptz_queue is not None:
             return
         import queue
-        from ..onvif import OnvifCamera
         cam = self.camera
-        self._ptz_cam = OnvifCamera(cam.hote, cam.user, cam.password, port=cam.port_http)
+        remote = getattr(cam, "remote", None)
+        if remote is not None:
+            # mode serveur : le PTZ est relayé par l'API (les identifiants DVR
+            # ne sont pas sur le poste client)
+            def move(pan, tilt, zoom):
+                remote.ptz_move(cam.id, pan, tilt, zoom)
+
+            def stop():
+                remote.ptz_stop(cam.id)
+        else:
+            from ..onvif import OnvifCamera
+            self._ptz_cam = OnvifCamera(cam.hote, cam.user, cam.password,
+                                        port=cam.port_http)
+            tok = cam.onvif_profile
+
+            def move(pan, tilt, zoom):
+                self._ptz_cam.ptz_move(tok, pan, tilt, zoom)
+
+            def stop():
+                self._ptz_cam.ptz_stop(tok)
+
         q = queue.Queue()
         self._ptz_queue = q
 
         def worker():
-            tok = cam.onvif_profile
             while True:
                 job = q.get()               # file capturée localement (pas self._…)
                 if job is None:
@@ -364,9 +382,9 @@ class VideoTile(QFrame):
                 kind, args = job
                 try:
                     if kind == "move":
-                        self._ptz_cam.ptz_move(tok, *args)
+                        move(*args)
                     else:
-                        self._ptz_cam.ptz_stop(tok)
+                        stop()
                 except Exception as e:
                     logger.warning(f"[{cam.id}] PTZ {kind}: {e}")
 

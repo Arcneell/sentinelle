@@ -121,7 +121,7 @@ def _qss() -> str:
     }}
     QLabel#brand {{
         color: {c['accent']};
-        font-size: 16px;
+        font-size: 15px;
         font-weight: 700;
         letter-spacing: 1px;
         padding-right: 4px;
@@ -133,14 +133,14 @@ def _qss() -> str:
         background: transparent;
         border: none;
         border-radius: 6px;
-        padding: 7px 11px;
+        padding: 6px 9px;
         margin: 0;
     }}
     QToolButton:hover {{ background: {c['surface_alt']}; }}
     QToolButton:pressed {{ background: {c['elevated']}; }}
     QToolButton:checked {{ background: {c['accent']}; color: {c['on_accent']}; }}
     QToolButton:disabled {{ color: {c['text_faint']}; }}
-    QToolButton::menu-button {{ border: none; width: 14px; }}
+    QToolButton::menu-indicator {{ image: none; width: 0; }}
 
     /* ---- champs ---- */
     QComboBox, QSpinBox, QLineEdit {{

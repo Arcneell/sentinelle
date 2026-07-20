@@ -47,9 +47,28 @@ def main() -> int:
                 config_path = portable
         config_path = config_path or default_config_path()
 
+    # Premier lancement : choix du mode AVANT d'ouvrir l'application. Fermer
+    # l'assistant sans choisir n'entre pas dans l'appli — on quitte, et le choix
+    # sera redemandé au prochain lancement.
+    from PySide6.QtCore import QSettings
+    settings = QSettings("Sentinelle", "viewer")
+    if not settings.contains("mode"):
+        from .ui.setup_dialog import SetupDialog
+        dlg = SetupDialog()
+        if not dlg.exec() or not dlg.resultat:
+            return 0
+        # repart d'une base propre (aucun compte hérité d'une install précédente)
+        settings.remove("serveur_user")
+        settings.remove("serveur_pass")
+        settings.setValue("mode", dlg.resultat["mode"])
+        if dlg.resultat["mode"] == "serveur":
+            settings.setValue("serveur_url", dlg.resultat["url"])
+
     from .ui.main_window import MainWindow
 
     win = MainWindow(config_path)
+    if getattr(win, "demarrage_annule", False):
+        return 0                         # connexion serveur abandonnée
     win.show()
     return app.exec()
 

@@ -1,5 +1,35 @@
 # Packaging & déploiement Sentinelle
 
+## Serveur central (optionnel)
+
+Sur une machine Linux avec Docker (VM, NAS, petit serveur — placée de façon à
+joindre les DVR et à être joignable par les postes) :
+
+```bash
+cd deploy
+docker compose up -d --build
+```
+
+- Un compte **admin** est créé au premier démarrage ; son mot de passe initial
+  est affiché dans les logs (`docker compose logs api`) et écrit dans
+  `deploy/data/admin-initial.txt`. Se connecter avec, le changer (Configuration
+  → Mon compte), puis supprimer ce fichier.
+- Pour reprendre une configuration existante d'un poste autonome, copier son
+  `config.yaml` dans `deploy/data/` avant le premier démarrage.
+- Toute la gestion (comptes utilisateurs et leurs droits, caméras, boucles,
+  réglages) se fait depuis l'application, connecté en admin → **Administration**.
+- Ports à ouvrir vers les postes : `8080/tcp` (API) et `8554/tcp` (flux RTSP).
+- Sur chaque poste : *Configuration → Connexion* → mode **Serveur central**,
+  adresse `http://serveur:8080`, puis connexion avec un compte. Sur les murs
+  d'affichage sans surveillance, utiliser un compte de visualisation dédié et
+  cocher « Rester connecté ».
+- Mise à jour : `git pull && docker compose up -d --build`. Après modification de
+  `deploy/mediamtx.yml` : `docker compose up -d --force-recreate mediamtx`.
+- En dehors d'un réseau de confiance (VPN), placer l'API derrière un
+  reverse-proxy TLS (Caddy, nginx).
+
+## Client
+
 ## Windows — build + signature
 
 ### 1. Construire l'exe

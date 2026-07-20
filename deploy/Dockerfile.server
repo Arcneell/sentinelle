@@ -1,0 +1,18 @@
+# Sentinelle Server — API de configuration + orchestration du relais vidéo.
+# Build depuis la racine du dépôt :
+#   docker build -f deploy/Dockerfile.server -t sentinelle-server .
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements-server.txt .
+RUN pip install --no-cache-dir -r requirements-server.txt
+
+# le serveur réutilise le modèle/ONVIF du paquet client (aucune dépendance Qt)
+COPY sentinelle/ sentinelle/
+COPY sentinelle_server/ sentinelle_server/
+
+ENV SENTINELLE_DATA=/data
+EXPOSE 8080
+
+CMD ["python", "-m", "sentinelle_server"]

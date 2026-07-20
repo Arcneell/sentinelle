@@ -1,0 +1,30 @@
+# Relais vidéo Sentinelle (MediaMTX) — configuration de base.
+# Les chemins (un par flux de caméra) sont poussés dynamiquement par l'API
+# Sentinelle via l'API MediaMTX (port 9997, réseau Docker interne — non publié).
+#
+# Autorisation : déléguée à l'API Sentinelle (auth externe HTTP). Chaque lecture
+# d'un flux est validée par l'API selon le jeton de session (mot de passe RTSP)
+# et les droits de l'utilisateur sur la caméra demandée. L'API de contrôle,
+# les métriques et le profilage sont exclus de cette vérification (réseau
+# interne uniquement).
+
+logLevel: info
+
+api: yes
+apiAddress: :9997
+
+rtspAddress: :8554
+
+rtmp: no
+hls: no
+webrtc: no
+srt: no
+
+authMethod: http
+authHTTPAddress: http://api:8080/api/relay-auth
+authHTTPExclude:
+  - action: api
+  - action: metrics
+  - action: pprof
+
+paths: {}

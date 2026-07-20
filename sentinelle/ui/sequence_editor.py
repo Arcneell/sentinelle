@@ -95,7 +95,7 @@ class SequenceEditor(QDialog):
         super().__init__(parent)
         self._cfg = cfg
         self.modifie = False
-        self.setWindowTitle("Boucles / séquences")
+        self.setWindowTitle("Boucles")
         self.setMinimumSize(640, 440)
 
         self._seqs = QListWidget()
@@ -108,7 +108,7 @@ class SequenceEditor(QDialog):
         btn_sup.clicked.connect(self._supprimer)
 
         gauche = QVBoxLayout()
-        gauche.addWidget(QLabel("Séquences :"))
+        gauche.addWidget(QLabel("Boucles :"))
         gauche.addWidget(self._seqs, 1)
         gauche.addWidget(btn_nouv)
         gauche.addWidget(btn_ren)
@@ -168,10 +168,10 @@ class SequenceEditor(QDialog):
 
     def _nouvelle(self):
         if not self._cfg.cameras:
-            QMessageBox.information(self, "Séquences",
+            QMessageBox.information(self, "Boucles",
                                     "Ajoutez d'abord des caméras (bouton Configuration).")
             return
-        nom, ok = QInputDialog.getText(self, "Nouvelle séquence", "Nom :",
+        nom, ok = QInputDialog.getText(self, "Nouvelle boucle", "Nom :",
                                        text=f"Ronde {len(self._cfg.sequences) + 1}")
         if ok and nom.strip():
             self._cfg.sequences.append(Sequence(nom=nom.strip()))
@@ -193,7 +193,7 @@ class SequenceEditor(QDialog):
         if not seq:
             return
         if QMessageBox.question(self, "Supprimer",
-                                f"Supprimer la séquence « {seq.nom} » ?") == QMessageBox.Yes:
+                                f"Supprimer la boucle « {seq.nom} » ?") == QMessageBox.Yes:
             self._cfg.sequences.remove(seq)
             self.modifie = True
             self._maj_seqs()
