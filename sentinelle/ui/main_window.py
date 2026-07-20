@@ -111,13 +111,31 @@ class MainWindow(QMainWindow):
         return True
 
     def _deconnecter(self):
-        """Se déconnecter ferme l'application (session serveur oubliée). Au
-        prochain lancement, la page de connexion sera redemandée."""
-        from PySide6.QtWidgets import QApplication
+        """Ferme l'interface principale et rouvre la page de connexion. Une
+        nouvelle connexion réaffiche l'interface ; si elle est abandonnée,
+        l'application se ferme."""
         self._settings.remove("serveur_user")
         self._settings.remove("serveur_pass")
-        self.close()
-        QApplication.instance().quit()
+        # couper la session en cours
+        if self._act_motion.isChecked():
+            self._act_motion.setChecked(False)
+        if self._motion is not None:
+            self._motion.stop()
+            self._motion = None
+        self._seq_stop()
+        self._leave_mono()
+        self._vider_grille()
+
+        self.hide()                              # ferme l'interface principale
+        self._remote = self._creer_remote()      # accès non authentifié
+        if self._assurer_session():              # rouvre la page de connexion
+            self._maj_bouton_admin()
+            self._load_config()
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        else:
+            self.close()                         # connexion abandonnée → on ferme
 
     def _maj_bouton_admin(self):
         """Adapte l'interface aux droits : bouton Administration et pied latéral."""
