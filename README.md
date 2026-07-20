@@ -71,7 +71,7 @@ The Configuration window opens on first run.
 
 > **Prefer a package?** Pre-built Linux `.deb` files are attached to every
 > [release](https://github.com/Arcneell/sentinelle/releases):
-> `sudo apt install ./sentinelle_2.0.0_amd64.deb` (pulls `libmpv2` automatically).
+> `sudo apt install ./sentinelle_2.0.1_amd64.deb` (pulls `libmpv2` automatically).
 
 ## Configuration
 
