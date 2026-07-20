@@ -1149,20 +1149,51 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _=False, e=ecran: self._fullscreen_sur(e))
 
     def _fullscreen_sur(self, ecran):
+        # mémorise la géométrie « normale » pour la retrouver intacte en sortie
+        # (uniquement au 1er passage : changer d'écran en plein écran ne doit pas
+        #  l'écraser)
+        if not self.isFullScreen():
+            self._geom_normale = self.saveGeometry()
         self._topbar.hide()
         self._sidebar.hide()
         self.statusBar().hide()
-        self.setGeometry(ecran.geometry())
+        # Cible l'écran voulu par un simple déplacement, PAS par setGeometry sur
+        # le cadre : imposer 1920×1080 à une fenêtre encore encadrée dépasse
+        # l'écran (avertissement Windows) et corrompait la géométrie normale, si
+        # bien qu'en revenant la barre de titre se retrouvait hors écran.
+        if self.isFullScreen():
+            self.showNormal()                    # requis pour changer d'écran
+        self.move(ecran.geometry().topLeft())
         self.showFullScreen()
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
             self.showNormal()
+            geo = getattr(self, "_geom_normale", None)
+            if geo is not None:
+                self.restoreGeometry(geo)
+            self._assurer_visible()
             self._topbar.show()
             self._sidebar.show()
             self.statusBar().show()
         else:
             self._fullscreen_sur(self.screen())
+
+    def _assurer_visible(self):
+        """Garantit que la barre de titre reste dans la zone visible d'un écran
+        (utile si la configuration d'écrans a changé depuis la dernière fois)."""
+        ecran = self.screen() or QGuiApplication.primaryScreen()
+        if ecran is None:
+            return
+        dispo = ecran.availableGeometry()
+        cadre = self.frameGeometry()
+        if dispo.contains(cadre.topLeft()) and dispo.contains(cadre.topRight()):
+            return                               # barre de titre déjà visible
+        larg = min(self.width(), dispo.width())
+        haut = min(self.height(), dispo.height())
+        self.resize(larg, haut)
+        self.move(dispo.left() + (dispo.width() - larg) // 2,
+                  dispo.top() + (dispo.height() - haut) // 2)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
