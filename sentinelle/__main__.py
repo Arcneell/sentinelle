@@ -10,7 +10,7 @@ import logging
 import os
 import sys
 
-from .config import app_data_dir, default_config_path, migrer_ancien_dossier
+from .config import app_state_dir, default_config_path, migrer_ancien_dossier
 
 logger = logging.getLogger("sentinelle")
 
@@ -32,10 +32,16 @@ def _config_logging(verbose: bool):
 
 
 def _ajouter_journal_fichier():
-    """Ajoute le journal fichier (après l'éventuelle migration de dossier)."""
+    """Ajoute le journal fichier (après l'éventuelle migration de dossier).
+
+    Journal avec rotation (un mur tourne 24 h/24 : sans rotation le fichier
+    grossissait sans limite) dans le dossier d'état — sous Linux
+    ~/.local/state/sentinelle, pas ~/.config qui part dans les sauvegardes."""
+    from logging.handlers import RotatingFileHandler
     try:
-        os.makedirs(app_data_dir(), exist_ok=True)
-        fh = logging.FileHandler(os.path.join(app_data_dir(), "sentinelle.log"),
+        os.makedirs(app_state_dir(), exist_ok=True)
+        fh = RotatingFileHandler(os.path.join(app_state_dir(), "sentinelle.log"),
+                                 maxBytes=2_000_000, backupCount=3,
                                  encoding="utf-8")
         fh.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%H:%M:%S"))
@@ -84,11 +90,13 @@ def main() -> int:
     _installer_excepthook()
 
     if args.safe_video:
-        # sortie logicielle : évite le chemin OpenGL de mpv, qui peut faire
-        # tomber le serveur d'affichage sur certains pilotes GPU Linux.
-        os.environ.setdefault("SENTINELLE_MPV_VO", "x11")
+        # mode secours : coupe le décodage matériel (pilote GPU fragile). Le vo
+        # logiciel x11 n'existe que sous Linux — sous Windows on garde vo=gpu
+        # (le forcer à x11 rendait mpv inconstructible : aucune vidéo du tout).
+        if sys.platform != "win32":
+            os.environ.setdefault("SENTINELLE_MPV_VO", "x11")
         os.environ.setdefault("SENTINELLE_MPV_HWDEC", "no")
-        logger.info("Mode vidéo sûr : vo=x11, hwdec=no")
+        logger.info("Mode vidéo sûr : décodage matériel désactivé")
 
     migrer_ancien_dossier()          # reprend les données de l'ancien nom si présent
     _ajouter_journal_fichier()       # dossier de données désormais fixé
@@ -123,12 +131,28 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Sentinelle")
     # NE PAS quitter tant que seules des boîtes de dialogue de démarrage
-    # (assistant de premier lancement, page de connexion) sont affichées, AVANT
-    # la fenêtre principale. Sinon, sous certains gestionnaires de fenêtres
-    # (GNOME/Wayland en tête), la fermeture de la dernière boîte de dialogue fait
-    # quitter l'application et la fenêtre principale n'apparaît jamais — c'était
-    # le symptôme « je me connecte, la fenêtre de login se ferme, rien ne s'ouvre ».
+    # (avertissement, assistant de premier lancement, page de connexion) sont
+    # affichées, AVANT la fenêtre principale. Sinon, sous certains gestionnaires
+    # de fenêtres (GNOME/Wayland en tête), la fermeture de la dernière boîte de
+    # dialogue fait quitter l'application et la fenêtre principale n'apparaît
+    # jamais. Doit être posé AVANT le premier dialogue (dont l'avertissement
+    # Wayland ci-dessous).
     app.setQuitOnLastWindowClosed(False)
+
+    # Si Qt a fini en Wayland natif (repli de la liste « xcb;wayland » : plugin
+    # xcb inchargeable ou XWayland absent), l'incrustation mpv par wid ne peut
+    # pas fonctionner : chaque tuile échouerait en boucle sans explication. On
+    # le dit UNE fois, clairement, au lieu de laisser un mur noir mystérieux.
+    if (sys.platform.startswith("linux")
+            and app.platformName().lower().startswith("wayland")):
+        logger.error("Qt tourne en Wayland natif : l'affichage vidéo intégré "
+                     "(mpv/wid X11) est indisponible. Vérifier que XWayland est "
+                     "actif et que libxcb-cursor0 est installée.")
+        QMessageBox.warning(
+            None, "Sentinelle",
+            "L'affichage vidéo est indisponible en Wayland natif.\n\n"
+            "Vérifiez que XWayland est actif et que le paquet libxcb-cursor0\n"
+            "est installé (automatique via le paquet .deb), puis relancez.")
 
     from .ui.theme import apply_theme
     apply_theme(app)          # thème mémorisé (sombre par défaut)
@@ -168,7 +192,7 @@ def main() -> int:
         # un échec ici (config serveur, thème, écran…) fermait l'appli sans rien
         # afficher : on trace et on prévient l'utilisateur au lieu de disparaître.
         logger.exception("Échec au démarrage de la fenêtre principale")
-        journal = os.path.join(app_data_dir(), "sentinelle.log")
+        journal = os.path.join(app_state_dir(), "sentinelle.log")
         QMessageBox.critical(None, "Sentinelle",
                              "Le démarrage a échoué.\n\n"
                              f"Détails dans le journal :\n{journal}")

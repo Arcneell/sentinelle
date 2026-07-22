@@ -56,7 +56,12 @@ class MotionMonitor(QObject):
             if cam_id not in voulus or self._ident.get(cam_id) != self._empreinte(voulus[cam_id]):
                 self._arreter_cam(cam_id)
         for cam_id, cam in voulus.items():
-            if cam_id not in self._threads:
+            th = self._threads.get(cam_id)
+            if th is None or not th.is_alive():
+                # thread jamais lancé, ou mort (abandon 401) : (re)démarrer —
+                # un rechargement de config redonne ainsi sa chance à la caméra
+                if th is not None:
+                    self._arreter_cam(cam_id)
                 self._demarrer_cam(cam)
                 self._ident[cam_id] = self._empreinte(cam)
         if self._threads and not self._retombee.isActive():
@@ -94,12 +99,21 @@ class MotionMonitor(QObject):
             try:
                 oc = OnvifCamera(cam.hote, cam.user, cam.password, port=cam.port_http)
                 endpoint = oc.abonner_mouvement("PT1M")
+            except PermissionError as e:
+                # identifiants refusés : on n'insiste JAMAIS (lockout du compte
+                # DVR) ; l'entrée est retirée pour qu'un rechargement de config
+                # avec identifiants corrigés puisse relancer la surveillance.
+                logger.warning(f"[{cam.id}] événements ONVIF refusés ({e}) — abandon")
+                self._oublier(cam.id)
+                return
             except Exception as e:
+                # site 4G coupé, caméra qui redémarre… : on n'abandonne plus
+                # définitivement, on espace les tentatives (plafond 5 min)
                 echecs += 1
-                if echecs >= 3:
-                    logger.info(f"[{cam.id}] pas d'événements ONVIF ({e})")
-                    return
-                self._attendre(ev, min(2 ** echecs, 20))
+                if echecs == 3:
+                    logger.info(f"[{cam.id}] événements ONVIF indisponibles ({e}) "
+                                "— nouvelles tentatives espacées")
+                self._attendre(ev, min(2 ** min(echecs, 8), 300))
                 continue
             echecs = 0
             t_renouv = time.time() + 50
@@ -108,6 +122,9 @@ class MotionMonitor(QObject):
                     evenements = oc.tirer_mouvement(endpoint, "PT5S")
                 except Exception:
                     break                       # ré-abonnement
+                if ev.is_set():
+                    return          # arrêté pendant le PullMessages (jusqu'à 12 s) :
+                                    # ne pas surligner une tuile après stop()
                 for _source, actif in evenements:
                     if actif:
                         self._marquer_actif(cam.id)
@@ -118,15 +135,24 @@ class MotionMonitor(QObject):
                 if time.time() > t_renouv:
                     break                       # renouvelle l'abonnement
 
+    def _oublier(self, cam_id):
+        """Retire une caméra abandonnée pour que surveiller() puisse relancer."""
+        self._threads.pop(cam_id, None)
+        self._stop.pop(cam_id, None)
+        self._ident.pop(cam_id, None)
+
     def _marquer_actif(self, cam_id):
         with self._lock:
             nouveau = cam_id not in self._actifs
             self._actifs[cam_id] = time.time()
         if nouveau:
-            self.motion_changed.emit(cam_id, True)
+            self._signaler(cam_id, True)
 
     def _signaler(self, cam_id, actif):
-        self.motion_changed.emit(cam_id, actif)
+        try:
+            self.motion_changed.emit(cam_id, actif)
+        except RuntimeError:
+            pass                    # objet Qt détruit (fermeture de l'application)
 
     def _verifier_retombee(self):
         maintenant = time.time()

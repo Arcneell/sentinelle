@@ -11,13 +11,15 @@ meurt n'affecte jamais les autres tuiles.
 """
 
 import logging
+import os
+import sys
 import threading
 from collections import deque
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QStandardPaths, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
                                QSizePolicy, QStackedLayout, QVBoxLayout, QWidget)
 
@@ -31,6 +33,34 @@ CONNECT_TIMEOUT_S = 15
 BACKOFF_MIN = 5
 BACKOFF_MAX = 600
 BACKOFF_FACTOR = 2
+
+# Raisons end-file de libmpv (client.h). evt.data.reason est un ENTIER nu
+# (str() donne « 2 », jamais « stop » — l'ancien filtre textuel ne matchait
+# jamais et chaque arrêt volontaire était compté comme un échec).
+# 2 = STOP : arrêt demandé (command("stop") ou remplacement par loadfile) ;
+# 3 = QUIT. Ni l'un ni l'autre n'est un échec ; 0 = EOF (flux live coupé) et
+# 4 = ERROR restent des échecs à reconnecter.
+_ENDFILE_BENIN = (2, 3)
+
+# threads de libération mpv encore en vol (voir VideoTile.dispose) : joints à la
+# fermeture de l'application pour ne pas tuer un terminate() en plein démontage
+_liberations_lock = threading.Lock()
+_liberations: set = set()
+
+
+def attendre_liberations(timeout_s: float = 5.0):
+    """Attend (borné) la fin des libérations mpv en arrière-plan — à appeler à
+    la fermeture : sortir du process pendant un terminate() laissait mpv en
+    course avec la destruction des fenêtres natives."""
+    import time
+    fin = time.time() + timeout_s
+    with _liberations_lock:
+        threads = list(_liberations)
+    for th in threads:
+        restant = fin - time.time()
+        if restant <= 0:
+            break
+        th.join(restant)
 
 KIND_LABELS = {
     "timeout": "délai dépassé",
@@ -59,8 +89,13 @@ _DOT_COLORS = {
 
 
 def snapshot_path(camera) -> str:
-    """Chemin horodaté pour une capture manuelle (Images/Sentinelle/)."""
-    dossier = Path.home() / "Pictures" / "Sentinelle"
+    """Chemin horodaté pour une capture manuelle (Images/Sentinelle/).
+
+    Suit le dossier « images » réel du poste (xdg-user-dirs : ~/Images sur un
+    Debian francophone, Pictures/OneDrive sous Windows) — le chemin anglophone
+    codé en dur créait un ~/Pictures parallèle invisible dans GNOME Fichiers."""
+    base = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
+    dossier = Path(base or Path.home()) / "Sentinelle"
     dossier.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return str(dossier / f"{camera.id}-{stamp}.jpg")
@@ -93,8 +128,9 @@ class VideoTile(QFrame):
     # signaux internes — émis depuis le thread mpv / threads de probe,
     # délivrés sur le thread Qt (queued)
     _evt_playing = Signal(int)              # génération
-    _evt_ended = Signal(int, str)           # génération, reason
+    _evt_ended = Signal(int, int)           # génération, reason (code libmpv)
     _probe_done = Signal(int, str, str)     # génération, kind, detail
+    _libere = Signal()                      # terminate() mpv fini (dispose)
 
     def __init__(self, camera: Camera, vue: str, parent=None):
         super().__init__(parent)
@@ -118,6 +154,7 @@ class VideoTile(QFrame):
         self._motion_on = False              # surlignage « mouvement détecté »
         self._controls = None
         self._log_tail = deque(maxlen=80)   # dernières lignes mpv pour diagnostic
+        self._hwdec_signale = False         # avertissement « décodage logiciel » émis
 
         self._build_ui()
 
@@ -307,8 +344,8 @@ class VideoTile(QFrame):
     def _save_snapshot(self):
         if self._player is None or self.state != TileState.PLAYING:
             return
-        path = snapshot_path(self.camera)
         try:
+            path = snapshot_path(self.camera)
             self._player.command("screenshot-to-file", path, "video")
             self.snapshot_saved.emit(path)
         except Exception as e:
@@ -465,7 +502,7 @@ class VideoTile(QFrame):
             self._set_state(TileState.IDLE, message)
 
     def shutdown(self):
-        """Destruction de la tuile : libère mpv et arrête le PTZ."""
+        """Destruction de la tuile : libère mpv et arrête le PTZ (synchrone)."""
         self._ptz_shutdown()            # stoppe un mouvement en cours + le worker
         self.stop()
         if self._player is not None:
@@ -474,6 +511,42 @@ class VideoTile(QFrame):
             except Exception:
                 pass
             self._player = None
+
+    def dispose(self):
+        """Comme shutdown() + deleteLater(), mais libère mpv HORS du thread Qt.
+
+        terminate() joint le thread d'événements mpv et démonte le flux RTSP :
+        en série sur 9-16 tuiles, cela gelait l'interface plusieurs secondes à
+        chaque changement de vue sur les mini-PC. La tuile se cache tout de
+        suite, la libération se fait en arrière-plan, puis le widget se détruit
+        (la fenêtre X11 du wid reste vivante tant que mpv ne l'a pas lâchée)."""
+        self._ptz_shutdown()
+        self.stop()
+        self.hide()
+        player, self._player = self._player, None
+        if player is None:
+            self.deleteLater()
+            return
+        self._libere.connect(self.deleteLater)
+
+        def work():
+            try:
+                player.terminate()
+            except Exception:
+                pass
+            finally:
+                with _liberations_lock:
+                    _liberations.discard(th)
+            try:
+                self._libere.emit()
+            except RuntimeError:
+                pass                    # widget déjà détruit (fermeture d'appli)
+
+        th = threading.Thread(target=work, daemon=True,
+                              name=f"mpv-term-{self.camera.id}")
+        with _liberations_lock:
+            _liberations.add(th)
+        th.start()
 
     def retry_auth(self):
         """Réarmement MANUEL après correction des identifiants (action utilisateur
@@ -501,11 +574,10 @@ class VideoTile(QFrame):
 
         @self._player.event_callback("end-file")
         def _ended(evt):
-            reason = ""
             try:
-                reason = str(getattr(evt.data, "reason", "") or "")
+                reason = int(getattr(evt.data, "reason", -1))
             except Exception:
-                pass
+                reason = -1
             try:
                 self._evt_ended.emit(self._gen, reason)
             except RuntimeError:
@@ -519,8 +591,17 @@ class VideoTile(QFrame):
         except Exception as e:
             self._set_state(TileState.NO_PLAYER, f"Erreur lecteur : {e}")
             return
+        # l'URL est re-résolue à CHAQUE tentative : en mode serveur le jeton de
+        # session (incrusté dans l'URL du relais) est rafraîchi périodiquement —
+        # une URL figée au constructeur rejouait l'ancien jeton à l'infini et la
+        # tuile ne revenait jamais après une expiration.
+        try:
+            self._url = self.camera.url_pour_vue(self.vue)
+        except Exception:
+            pass                        # caméra incomplète : on garde l'URL connue
         self._gen += 1              # nouvelle tentative : périme les sondes précédentes
         self._probing = False
+        self._retry_timer.stop()    # un seul réessai armé à la fois
         self._set_state(TileState.CONNECTING, "Connexion…")
         self._log_tail.clear()
         try:
@@ -530,6 +611,22 @@ class VideoTile(QFrame):
             self._handle_failure()
             return
         self._connect_timer.start()
+
+    def _log_hwdec(self):
+        """Rend visible le mode de décodage réel : le repli VA-API → logiciel de
+        mpv est silencieux, et c'est lui qui sature les mini-PC quand le
+        pilote manque (va-driver-all non installé)."""
+        try:
+            hw = str(self._player.hwdec_current or "no")
+        except Exception:
+            return
+        logger.debug(f"[{self.camera.id}] décodage : {hw}")
+        if (sys.platform != "win32" and hw == "no" and not self._hwdec_signale
+                and os.environ.get("SENTINELLE_MPV_HWDEC", "") != "no"):
+            self._hwdec_signale = True
+            logger.warning(
+                f"[{self.camera.id}] décodage LOGICIEL (VA-API indisponible ?) — "
+                "charge CPU élevée ; vérifier le paquet va-driver-all")
 
     def _on_mpv_log(self, level, component, message):
         # appelé depuis le thread mpv — deque est thread-safe pour append
@@ -541,9 +638,11 @@ class VideoTile(QFrame):
         if gen != self._gen or self._stopping:
             return
         self._connect_timer.stop()
+        self._retry_timer.stop()    # un réessai encore armé rebouclerait un flux sain
         if self._failures > 0:
             logger.info(f"[{self.camera.id}] reconnecté après {self._failures} échec(s)")
         self._failures = 0
+        self._log_hwdec()
         self._set_state(TileState.PLAYING)
         self._debit_timer.start()
         if self._zoom:
@@ -553,13 +652,13 @@ class VideoTile(QFrame):
         if self.camera.reconnexion_preventive_s > 0:
             self._preventive_timer.start(self.camera.reconnexion_preventive_s * 1000)
 
-    def _on_ended(self, gen: int, reason: str):
+    def _on_ended(self, gen: int, reason: int):
         if gen != self._gen:
             return          # end-file d'une connexion périmée (remplacement de flux)
         if self._stopping or self.state in (TileState.AUTH_FAILED, TileState.IDLE):
             return
-        if "stop" in reason.lower():
-            return
+        if reason in _ENDFILE_BENIN:
+            return          # arrêt provoqué par nous (stop / remplacement de flux)
         self._connect_timer.stop()
         self._handle_failure()
 
@@ -592,6 +691,9 @@ class VideoTile(QFrame):
             return
 
         # logs mpv peu parlants → ffprobe (si présent) tranche en arrière-plan
+        if kind == "other" and not kind_hint and not ffprobe_available():
+            from ..probe import avertir_ffprobe_absent
+            avertir_ffprobe_absent()
         if kind == "other" and not kind_hint and ffprobe_available() and not self._probing:
             self._probing = True
             url = self._url
@@ -614,7 +716,10 @@ class VideoTile(QFrame):
         if gen != self._gen:
             return
         self._probing = False
-        if self._stopping or self.state == TileState.AUTH_FAILED:
+        if self._stopping or self.state != TileState.CONNECTING:
+            # seul l'état « Diagnostic… » attend ce verdict : si la tuile a déjà
+            # basculé (timeout → BACKOFF, lecture repartie…), ne pas replanifier
+            # un second réessai ni renverser un flux vivant.
             return
         if kind == "auth":
             self._enter_auth_failed(detail[:200])

@@ -169,6 +169,13 @@ class PhotoTile(QFrame):
     def start(self):
         if self.state == TileState.AUTH_FAILED:
             return
+        # ré-résout l'URL (jeton serveur rafraîchi) et désarme un verrou resté
+        # levé si un téléchargement précédent est mort sans répondre
+        try:
+            self._url = self.camera.snapshot_url() or self._url
+        except Exception:
+            pass
+        self._fetching = False
         if not self._url:
             self._set_state(TileState.NO_PLAYER,
                             "Pas d'URL snapshot pour cette caméra\n"
@@ -188,6 +195,11 @@ class PhotoTile(QFrame):
     def shutdown(self):
         self.stop()
 
+    def dispose(self):
+        """Même interface que VideoTile.dispose() : arrêt + autodestruction."""
+        self.shutdown()
+        self.deleteLater()
+
     # -------------------------------------------------------------- fetching
 
     def _fetch(self):
@@ -197,7 +209,12 @@ class PhotoTile(QFrame):
         url, user, pwd = self._url, self.camera.user, self.camera.password
 
         def work():
-            data, kind, detail = fetch_snapshot(url, user, pwd)
+            # corps intégralement protégé : une exception inattendue laisserait
+            # _fetching levé pour toujours et la tuile figée sur « Chargement… »
+            try:
+                data, kind, detail = fetch_snapshot(url, user, pwd)
+            except Exception as e:
+                data, kind, detail = None, "other", str(e)[:200]
             try:
                 self._result.emit(data, kind, detail)
             except RuntimeError:

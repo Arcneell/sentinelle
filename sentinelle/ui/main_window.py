@@ -14,11 +14,11 @@ import threading
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QMainWindow, QMenu, QMessageBox,
-                               QPushButton, QSpinBox, QSplitter, QStackedWidget,
-                               QToolButton, QTreeWidget, QTreeWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QMainWindow, QMenu,
+                               QMessageBox, QPushButton, QSpinBox, QSplitter,
+                               QStackedWidget, QToolButton, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import APP_NAME
 from ..config import (AppConfig, load_config, purger_cameras_sequences,
@@ -39,11 +39,17 @@ class MainWindow(QMainWindow):
     # résultat du contrôle de session exécuté en arrière-plan :
     # "ok" | "reconnecte" | "interactif" | "erreur"
     _session_resultat = Signal(str)
+    # résultat du chargement de configuration serveur exécuté en arrière-plan :
+    # (cfg | None, erreur "" | "jeton" | message, initial)
+    _config_resultat = Signal(object, str, bool)
 
     def __init__(self, config_path: str):
         super().__init__()
         self._config_path = config_path             # config locale (mode autonome)
         self._cfg = AppConfig(path=config_path)
+        self._cfg_fetch_en_cours = False            # un chargement serveur est en vol
+        self._cfg_retry = 0                         # relances auto après erreur serveur
+        self._session_ui_en_cours = False           # page de connexion à l'écran
         self._tiles: dict[str, QWidget] = {}       # camera_id -> tuile (vidéo ou photo)
         self._mono_tile: VideoTile | None = None
         self._grid_dirty = False
@@ -155,7 +161,7 @@ class MainWindow(QMainWindow):
         mémorisés (le jeton est rafraîchi en place sur l'objet partagé). Le
         résultat revient sur le thread Qt via _session_resultat."""
         if (self._remote is None or not self._remote.connecte
-                or self._session_verif_en_cours):
+                or self._session_verif_en_cours or self._session_ui_en_cours):
             return
         from ..config import desobfusquer
         self._session_verif_en_cours = True
@@ -172,7 +178,10 @@ class MainWindow(QMainWindow):
                     reste = remote.session_reste()
                 except JetonInvalide:
                     reste = 0                    # jeton mort : rafraîchir tout de suite
-                if reste is None or reste >= 86400:
+                # seuil = 2 ticks du contrôle (15 min) : l'ancien seuil de 24 h
+                # déclenchait un rafraîchissement (donc un rechargement complet)
+                # toutes les 15 min dès que le TTL serveur était ≤ 24 h
+                if reste is None or reste >= 1800:
                     res = "ok"
                 elif user and mdp:
                     try:
@@ -199,17 +208,30 @@ class MainWindow(QMainWindow):
         threading.Thread(target=work, daemon=True, name="session-check").start()
 
     def _on_session_resultat(self, res: str):
+        if res == "interactif" and QApplication.activeModalWidget() is not None:
+            # ne pas ouvrir la page de connexion PAR-DESSUS un dialogue en cours :
+            # on repasse dans 2 s (le drapeau reste levé : pas de double contrôle)
+            QTimer.singleShot(2000, lambda: self._on_session_resultat(res))
+            return
         self._session_verif_en_cours = False
         # la session a pu changer pendant le contrôle (déconnexion, bascule de
         # mode, autre serveur) : dans ce cas le résultat ne la concerne plus
         if self._remote is None or self._remote is not getattr(self, "_session_remote", None):
             return
         if res == "reconnecte":
-            # nouveau jeton : recharger pour régénérer les URLs de flux/snapshot
-            self._load_config()
+            # jeton rafraîchi EN PLACE : mettre à jour les URLs des caméras sans
+            # reconstruire le mur — le relais ne vérifie le jeton qu'à l'ouverture
+            # d'un flux, les lectures en cours survivent, et les tuiles utilisent
+            # le nouveau jeton à leur prochaine (re)connexion.
+            self._remote.maj_jeton_urls(self._cfg)
         elif res == "interactif":
             self._remote.jeton = ""
-            if self._assurer_session():
+            self._session_ui_en_cours = True
+            try:
+                ok = self._assurer_session()
+            finally:
+                self._session_ui_en_cours = False
+            if ok:
                 self._load_config()
 
     def _deconnecter(self):
@@ -557,6 +579,7 @@ class MainWindow(QMainWindow):
         self._session_timer.setInterval(15 * 60 * 1000)
         self._session_timer.timeout.connect(self._verifier_session)
         self._session_resultat.connect(self._on_session_resultat)
+        self._config_resultat.connect(self._on_config_resultat)
 
     def _tbtn(self, nom_icone: str, texte: str, tooltip: str, slot,
               checkable: bool = False) -> QToolButton:
@@ -616,36 +639,104 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------- configuration
 
     def _load_config(self, initial: bool = False):
-        if self._remote is not None:
-            from ..remote import ErreurServeur, JetonInvalide
-            try:
-                cfg = self._remote.config_vue()
-            except JetonInvalide:
-                # session expirée (mot de passe changé, serveur redémarré…)
-                self._remote.jeton = ""
-                if self._assurer_session():
-                    return self._load_config(initial)
-                cfg = AppConfig(path="")
-            except ErreurServeur as e:
-                cfg = AppConfig(path="")
-                QMessageBox.warning(
-                    self, "Serveur",
-                    f"Connexion au serveur impossible :\n{e}\n\n"
-                    "Vérifiez l'adresse et reconnectez-vous dans la Configuration.")
-            except Exception as e:
-                cfg = AppConfig(path="")
-                QMessageBox.warning(self, "Serveur", f"Erreur inattendue : {e}")
-        else:
+        if self._remote is None:
             try:
                 cfg = load_config(self._config_path)
             except Exception as e:
                 QMessageBox.critical(self, "Configuration", str(e))
                 return
+            self._appliquer_config(cfg, initial)
+            return
 
+        # mode serveur : la récupération HTTP (jusqu'à ~13 s de timeout) se fait
+        # HORS du thread UI — elle gelait toute l'interface à chaque rechargement.
+        # La garde est liée à l'objet remote : après une déconnexion/bascule, un
+        # chargement de l'ANCIENNE session ne doit pas bloquer celui de la nouvelle.
+        if self._cfg_fetch_en_cours and self._remote is getattr(self, "_cfg_remote", None):
+            return
+        self._cfg_fetch_en_cours = True
+        remote = self._remote
+        self._cfg_remote = remote               # sur quel objet ce chargement porte
+        self.statusBar().showMessage("Chargement de la configuration…")
+
+        def work():
+            from ..remote import ErreurServeur, JetonInvalide
+            cfg, err = None, ""
+            try:
+                cfg = remote.config_vue()
+            except JetonInvalide:
+                err = "jeton"
+            except ErreurServeur as e:
+                err = str(e) or "serveur injoignable"
+            except Exception as e:
+                logger.exception("Chargement de la configuration : erreur inattendue")
+                err = str(e) or "erreur inattendue"
+            try:
+                self._config_resultat.emit(cfg, err, initial)
+            except RuntimeError:
+                pass                             # fenêtre détruite entre-temps
+        threading.Thread(target=work, daemon=True, name="config-fetch").start()
+
+    def _on_config_resultat(self, cfg, err: str, initial: bool):
+        # la session a pu changer pendant le chargement (déconnexion, bascule…) :
+        # résultat obsolète — sans toucher au drapeau d'un chargement plus récent
+        if self._remote is None or self._remote is not getattr(self, "_cfg_remote", None):
+            return
+        self._cfg_fetch_en_cours = False
+        if QApplication.activeModalWidget() is not None:
+            # un dialogue d'édition est ouvert : appliquer maintenant écraserait
+            # la config en cours d'édition — on repasse quand il sera fermé
+            self._cfg_fetch_en_cours = True      # bloque un nouveau chargement
+            QTimer.singleShot(1500, lambda: self._on_config_resultat(cfg, err, initial))
+            return
+
+        if err == "jeton":
+            # session expirée (mot de passe changé, serveur redémarré…). Le
+            # verrou empêche une relance programmée (backoff, contrôle de
+            # session) de partir avec un jeton vide PENDANT la page de connexion
+            # — elle rouvrait une seconde page par-dessus la première.
+            self._remote.jeton = ""
+            self._session_ui_en_cours = True
+            try:
+                ok = self._assurer_session()
+            finally:
+                self._session_ui_en_cours = False
+            if ok:
+                self._load_config(initial)
+                return
+            err = "session expirée"
+
+        if err:
+            # on GARDE la configuration et le mur actuels (les tuiles ont leur
+            # propre reconnexion) au lieu de tout remplacer par une config vide,
+            # et on retente tout seul avec un délai croissant.
+            self._cfg_retry += 1
+            delay = min(5 * (2 ** (self._cfg_retry - 1)), 60)
+            self.statusBar().showMessage(
+                f"Serveur injoignable ({err}) — nouvel essai dans {delay}s")
+            if not self._cfg.cameras:
+                self._selection_appliquee()      # placeholder « non connecté »
+            QTimer.singleShot(delay * 1000, self._relancer_load_config)
+            return
+
+        self._cfg_retry = 0
+        self._appliquer_config(cfg, initial)
+
+    def _relancer_load_config(self):
+        if (self._remote is not None and not self._cfg_fetch_en_cours
+                and not self._session_ui_en_cours
+                and self._remote is getattr(self, "_cfg_remote", None)):
+            self._load_config()
+
+    def _appliquer_config(self, cfg, initial: bool = False):
         self.statusBar().clearMessage()      # efface un éventuel message persistant
         self._seq_stop()
         self._leave_mono()
         self._vider_grille()
+        # revenir explicitement à la page grille : un rechargement reçu en vue
+        # mono laissait la pile sur une page mono vidée — écran noir définitif
+        self._stack.setCurrentWidget(self._grid_page)
+        self._act_grid.setEnabled(False)
         self._cfg = cfg
 
         self._rot_spin.blockSignals(True)
@@ -876,10 +967,8 @@ class MainWindow(QMainWindow):
 
     def _vider_grille(self):
         for tile in self._tiles.values():
-            tile.shutdown()
             self._grid_layout.removeWidget(tile)
-            tile.setParent(None)
-            tile.deleteLater()
+            tile.dispose()      # libère mpv hors thread UI puis se détruit
         self._tiles.clear()
 
     def _set_grid(self, ids: list[str]):
@@ -895,23 +984,13 @@ class MainWindow(QMainWindow):
         for cam_id in list(self._tiles):
             if cam_id not in ids:
                 tile = self._tiles.pop(cam_id)
-                tile.shutdown()
                 self._grid_layout.removeWidget(tile)
-                tile.setParent(None)
-                tile.deleteLater()
+                tile.dispose()
 
         for cam_id in ids:
             if cam_id not in self._tiles:
                 tile = self._make_tile(self._cfg.camera(cam_id), vue)
                 self._tiles[cam_id] = tile
-
-        # (re)démarre toute tuile affichée à l'arrêt : une tuile conservée d'une
-        # étape précédente (ex. retour de vue mono dans une boucle) a été stoppée
-        # et doit repartir, sans reconnecter celles déjà en lecture.
-        if not paused:
-            for tile in self._tiles.values():
-                if tile.state == TileState.IDLE:
-                    tile.start()
 
         for tile in self._tiles.values():
             self._grid_layout.removeWidget(tile)
@@ -951,6 +1030,15 @@ class MainWindow(QMainWindow):
                 self._grid_layout.setColumnStretch(c, 1)
             for r in range(math.ceil(len(ordered) / cols)):
                 self._grid_layout.setRowStretch(r, 1)
+
+        # (re)démarre APRÈS l'insertion dans la grille : démarrer avant prenait
+        # le winId() d'une fenêtre native créée hors hiérarchie, puis reparentée
+        # — identifiant potentiellement recréé sous X11, donc wid mpv périmé.
+        # Relance aussi toute tuile conservée à l'arrêt (retour de vue mono).
+        if not paused:
+            for tile in self._tiles.values():
+                if tile.state == TileState.IDLE:
+                    tile.start()
         self._grid_dirty = False
         self._update_status()
 
@@ -975,10 +1063,8 @@ class MainWindow(QMainWindow):
 
     def _leave_mono(self):
         if self._mono_tile is not None:
-            self._mono_tile.shutdown()
             self._mono_layout.removeWidget(self._mono_tile)
-            self._mono_tile.setParent(None)
-            self._mono_tile.deleteLater()
+            self._mono_tile.dispose()
             self._mono_tile = None
 
     def _go_grid(self):
@@ -997,9 +1083,14 @@ class MainWindow(QMainWindow):
         self._go_grid()
 
     def _tuile_double_clic(self, cam_id: str):
+        # mémorise la vue AVANT _seq_stop : pendant une étape mono de boucle,
+        # _seq_stop ramène déjà à la grille, et le test après coup re-basculait
+        # aussitôt en mono au lieu de rendre la main à l'utilisateur
+        en_mono = self._stack.currentWidget() is self._mono_page
         self._seq_stop()
-        if self._stack.currentWidget() is self._mono_page:
-            self._go_grid()
+        if en_mono:
+            if self._stack.currentWidget() is self._mono_page:
+                self._go_grid()
         else:
             self._set_mono(cam_id)
 
@@ -1110,6 +1201,9 @@ class MainWindow(QMainWindow):
     def _rotation_tick(self):
         if self._seq is not None or self._act_pause.isChecked():
             return
+        if QApplication.activeModalWidget() is not None:
+            return      # ne pas changer de vue (ni ouvrir de mainstream) derrière
+                        # un dialogue d'édition ; le tick suivant reprendra
         if self._stack.currentWidget() is self._mono_page:
             # mono : caméra suivante parmi les cochées
             ids = self._cameras_cochees()
@@ -1157,7 +1251,10 @@ class MainWindow(QMainWindow):
             self._act_seq.blockSignals(False)
         self._act_seq.setIcon(icon("play"))
         self._act_seq.setText("Lire")
-        # retour à l'affichage piloté par la sélection
+        # retour à l'affichage piloté par la sélection — la grille affichée par
+        # la dernière étape de la boucle ne correspond pas aux caméras cochées :
+        # forcer la reconstruction, sinon on relançait les caméras de la boucle
+        self._grid_dirty = True
         if self._stack.currentWidget() is self._mono_page:
             self._go_grid()
         else:
@@ -1242,6 +1339,9 @@ class MainWindow(QMainWindow):
         self._selection_appliquee()
 
     def _on_motion(self, cam_id: str, actif: bool):
+        if actif and not self._act_motion.isChecked():
+            return      # événement livré après désactivation (signal queued d'un
+                        # thread de tirage encore en vol) : ne pas surligner
         if actif:
             self._motion_ids.add(cam_id)
         else:
@@ -1362,6 +1462,17 @@ class MainWindow(QMainWindow):
             self._save_timer.stop()
             if self._remote is None:          # jamais la projection serveur
                 save_config(self._cfg)
-        self._leave_mono()
-        self._vider_grille()
+        # fermeture : libération SYNCHRONE (le processus s'arrête juste après,
+        # la libération en arrière-plan de dispose() n'aurait pas le temps)
+        if self._mono_tile is not None:
+            self._mono_tile.shutdown()
+            self._mono_tile = None
+        for tile in self._tiles.values():
+            tile.shutdown()
+        self._tiles.clear()
+        # attend (borné) les libérations mpv lancées par des dispose() récents :
+        # sortir du process pendant un terminate() laissait mpv en course avec
+        # la destruction des fenêtres natives
+        from .tile import attendre_liberations
+        attendre_liberations(5.0)
         super().closeEvent(event)

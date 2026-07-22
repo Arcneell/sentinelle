@@ -77,6 +77,10 @@ def test_grille_redemarre_apres_mono(tmp_path):
         def shutdown(self):
             self.state = TileState.IDLE
 
+        def dispose(self):
+            self.shutdown()
+            self.deleteLater()
+
     win = MainWindow(str(tmp_path / "config.yaml"))
     site = Site(id="s1", nom="S", lien="fibre")
     win._cfg.sites.append(site)

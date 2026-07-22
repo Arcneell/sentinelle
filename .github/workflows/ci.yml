@@ -45,14 +45,46 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: pytest -q
 
+  # Paquet Debian : construit le .deb sur trixie (la cible des postes muraux)
+  # et vérifie qu'il s'installe et démarre avec ses SEULS Depends — les
+  # régressions de packaging n'étaient détectées que chez le client.
+  deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construire le .deb (Debian 13)
+        run: |
+          mkdir -p dist
+          docker run --rm -v "$PWD:/src" -w /src debian:13 \
+            bash packaging/build_deb.sh
+
+      - name: Installer et fumer (Depends seuls, sans Recommends)
+        run: |
+          docker run --rm -v "$PWD/dist:/dist" debian:13 bash -ec '
+            set -o pipefail
+            apt-get update
+            apt-get install -y --no-install-recommends /dist/*.deb
+            # le plugin xcb doit être embarqué ET trouver ses bibliothèques système
+            XCB=$(find /opt/sentinelle -name libqxcb.so | head -1)
+            test -n "$XCB"
+            ldd "$XCB" | (! grep "not found")
+            # --help traverse le bootloader PyInstaller + argparse sans écran
+            /opt/sentinelle/sentinelle --help
+            # démarrage réel de Qt : atteindre la boucle d événements (124 = timeout)
+            timeout 15 env QT_QPA_PLATFORM=offscreen /opt/sentinelle/sentinelle || test $? -eq 124
+          '
+
   # Agrégateur : c'est LE check requis par la protection de branche (contexte
   # « test », aussi attendu par l'auto-merge Dependabot). Il n'est vert que si
   # toute la matrice l'est ; `if: always()` l'empêche d'être « skipped » quand
   # la matrice échoue (un check requis sauté passerait pour réussi).
   test:
-    needs: tests
+    needs: [tests, deb]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Vérifie que la matrice est verte
-        run: test "${{ needs.tests.result }}" = "success"
+        run: |
+          test "${{ needs.tests.result }}" = "success"
+          test "${{ needs.deb.result }}" = "success"
