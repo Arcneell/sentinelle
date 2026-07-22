@@ -112,6 +112,66 @@ def test_parcours_complet(tmp_path):
         assert c.get("/api/config", headers=V).status_code == 401
 
 
+def test_rondes_partagees(tmp_path):
+    """Rondes gérées par l'admin, attribuées à tous ou à certains comptes,
+    filtrées aux caméras visibles, et jamais écrasées par un PUT /api/config."""
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        tok = c.post("/api/login", json={"username": "admin", "password": mdp}).json()["token"]
+        A = {"Authorization": f"Bearer {tok}"}
+
+        users = c.get("/api/users", headers=A).json()["users"]
+        v = {"username": "v", "role": "user", "tout": False,
+             "sites": ["s1"], "cameras": [], "password": "viewer-1"}
+        w = {"username": "w", "role": "user", "tout": False,
+             "sites": [], "cameras": [], "password": "viewer-2"}
+        assert c.put("/api/users", headers=A,
+                     json={"users": users + [v, w]}).status_code == 200
+
+        etape = [{"mode": "grille", "cameras": ["cam1"], "duree_s": 10}]
+        rondes = {"sequences": [
+            {"nom": "Globale", "tous": True, "etapes": etape},
+            {"nom": "Ciblée", "utilisateurs": ["v"], "etapes": etape},
+            {"nom": "Vide", "etapes": []},                          # ignorée
+            {"nom": "Orpheline", "utilisateurs": ["ghost"], "etapes": etape},
+        ]}
+        r = c.put("/api/rounds", headers=A, json=rondes)
+        assert r.status_code == 200
+        assert r.json()["sequences"] == 3
+        assert r.json()["warnings"]              # ronde vide + compte inconnu
+
+        # lecture admin : attribution complète, compte inconnu retiré
+        liste = c.get("/api/rounds", headers=A).json()["sequences"]
+        assert [s["nom"] for s in liste] == ["Globale", "Ciblée", "Orpheline"]
+        assert liste[0]["tous"] is True
+        assert liste[2]["utilisateurs"] == []
+
+        # réservé aux admins
+        tv = c.post("/api/login", json={"username": "v", "password": "viewer-1"}).json()["token"]
+        V = {"Authorization": f"Bearer {tv}"}
+        assert c.get("/api/rounds", headers=V).status_code == 403
+        assert c.put("/api/rounds", headers=V, json=rondes).status_code == 403
+
+        # v voit la globale + la ciblée, marquées partagées, avant ses boucles perso
+        c.put("/api/account/sequences", headers=V, json={"sequences": [
+            {"nom": "Perso", "etapes": [{"mode": "mono", "cameras": ["cam1"], "duree_s": 5}]}]})
+        seqs = c.get("/api/config", headers=V).json()["sequences"]
+        assert [s["nom"] for s in seqs] == ["Globale", "Ciblée", "Perso"]
+        assert seqs[0]["partagee"] is True and seqs[1]["partagee"] is True
+        assert "partagee" not in seqs[2]
+
+        # w n'a aucune caméra visible : aucune ronde ne lui parvient
+        tw = c.post("/api/login", json={"username": "w", "password": "viewer-2"}).json()["token"]
+        W = {"Authorization": f"Bearer {tw}"}
+        assert c.get("/api/config", headers=W).json()["sequences"] == []
+
+        # un PUT /api/config (caméras) ne doit pas écraser les rondes stockées
+        assert c.put("/api/config", headers=A, json=CONFIG).status_code == 200
+        liste = c.get("/api/rounds", headers=A).json()["sequences"]
+        assert [s["nom"] for s in liste] == ["Globale", "Ciblée", "Orpheline"]
+
+
 def test_dernier_admin_protege(tmp_path):
     app = _client(tmp_path)
     with TestClient(app) as c:

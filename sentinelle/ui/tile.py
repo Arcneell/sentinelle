@@ -343,7 +343,7 @@ class VideoTile(QFrame):
     def _flux_text(self) -> str:
         flux = self.camera.flux_pour_vue(self.vue)
         eco = " · éco" if self.camera.profil.startswith("eco") else ""
-        return ("HD" if flux == "main" else "sub") + eco
+        return ("HD" if flux == "main" else "SD") + eco
 
     def _set_state(self, state: TileState, message: str = ""):
         self.state = state

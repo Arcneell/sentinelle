@@ -266,9 +266,22 @@ class Etape:
 class Sequence:
     nom: str
     etapes: list = field(default_factory=list)   # [Etape]
+    # rondes partagées (mode serveur) : identifiant stable + attribution
+    id: str = ""
+    tous: bool = False                           # attribuée à tous les comptes
+    utilisateurs: list = field(default_factory=list)   # comptes attribués
+    # transitoire côté client : ronde reçue du serveur, non modifiable localement
+    partagee: bool = False
 
     def to_dict(self) -> dict:
-        return {"nom": self.nom, "etapes": [e.to_dict() for e in self.etapes]}
+        d = {"nom": self.nom, "etapes": [e.to_dict() for e in self.etapes]}
+        if self.id:
+            d["id"] = self.id
+        if self.tous:
+            d["tous"] = True
+        if self.utilisateurs:
+            d["utilisateurs"] = list(self.utilisateurs)
+        return d
 
 
 @dataclass
@@ -341,7 +354,7 @@ def load_config(path: str) -> AppConfig:
                 lien = "fibre"
             cfg.sites.append(Site(id=str(s["id"]), nom=str(s.get("nom") or s["id"]), lien=lien))
         except (KeyError, TypeError) as e:
-            cfg.warnings.append(f"[site ?] entrée invalide ({e}) — skippée")
+            cfg.warnings.append(f"[site ?] entrée invalide ({e}) — ignorée")
 
     ids_vus = set()
     for c in raw.get("cameras") or []:
@@ -388,7 +401,7 @@ def load_config(path: str) -> AppConfig:
             ))
             ids_vus.add(cam_id)
         except (KeyError, ValueError, TypeError) as e:
-            cfg.warnings.append(f"[{nom}] config invalide : {e} — caméra skippée")
+            cfg.warnings.append(f"[{nom}] config invalide : {e} — caméra ignorée")
 
     cam_ids = {c.id for c in cfg.cameras}
     for s in raw.get("sequences") or []:
@@ -408,9 +421,25 @@ def load_config(path: str) -> AppConfig:
                                     duree_s=max(3, int(e.get("duree_s", 30)))))
             if not etapes:
                 raise ValueError("aucune étape valide")
-            cfg.sequences.append(Sequence(nom=str(nom), etapes=etapes))
+            cfg.sequences.append(Sequence(
+                nom=str(nom), etapes=etapes,
+                id=str(s.get("id", "")),
+                tous=bool(s.get("tous", False)),
+                utilisateurs=[str(x) for x in (s.get("utilisateurs") or [])]))
         except (KeyError, ValueError, TypeError) as e:
-            cfg.warnings.append(f"[séquence {nom}] invalide : {e} — skippée")
+            cfg.warnings.append(f"[séquence {nom}] invalide : {e} — ignorée")
+
+    # identifiant stable pour chaque séquence (rondes partagées côté serveur) ;
+    # les fichiers existants n'en ont pas : on en génère un depuis le nom
+    seq_ids = {s.id for s in cfg.sequences if s.id}
+    for s in cfg.sequences:
+        if not s.id:
+            base = slugify(s.nom)
+            cand, i = base, 2
+            while cand in seq_ids:
+                cand, i = f"{base}-{i}", i + 1
+            s.id = cand
+            seq_ids.add(cand)
 
     for w in cfg.warnings:
         logger.warning(w)

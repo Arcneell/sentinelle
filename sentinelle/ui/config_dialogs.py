@@ -29,6 +29,7 @@ from ..config import (LIENS, MARQUE_LABELS, MARQUES, MARQUES_URL_LIBRE,
                       purger_cameras_sequences)
 from ..snapshot import lister_canaux_hikvision
 from .icons import icon
+from .texte import compte
 
 
 def _port_ouvert(host: str, port: int, timeout: float = 3.0) -> bool:
@@ -67,6 +68,8 @@ class SiteDialog(QDialog):
         form.addRow("Type de lien :", self._lien)
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        boutons.button(QDialogButtonBox.Ok).setText("Valider")
+        boutons.button(QDialogButtonBox.Cancel).setText("Annuler")
         boutons.accepted.connect(self._valider)
         boutons.rejected.connect(self.reject)
 
@@ -184,7 +187,7 @@ class CameraDialog(QDialog):
         # actions : résolution ONVIF + test de connexion
         self._btn_onvif = QPushButton(icon("search"), " ONVIF : récupérer les flux")
         self._btn_onvif.clicked.connect(self._resoudre_onvif)
-        self._btn_test = QPushButton(" Tester la connexion")
+        self._btn_test = QPushButton("Tester la connexion")
         self._btn_test.clicked.connect(self._tester_connexion)
         ligne_actions = QHBoxLayout()
         ligne_actions.addWidget(self._btn_onvif)
@@ -194,6 +197,8 @@ class CameraDialog(QDialog):
         self._statut.setObjectName("hint")
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        boutons.button(QDialogButtonBox.Ok).setText("Valider")
+        boutons.button(QDialogButtonBox.Cancel).setText("Annuler")
         boutons.accepted.connect(self._valider)
         boutons.rejected.connect(self.reject)
 
@@ -409,14 +414,14 @@ class DvrDialog(QDialog):
         self._btn_scan = QPushButton(icon("search"), " Interroger le DVR (canaux + noms)")
         self._btn_scan.clicked.connect(self._scanner)
         self._nb = QSpinBox(); self._nb.setRange(1, 64); self._nb.setValue(8)
-        btn_manuel = QPushButton("Générer la liste manuellement")
+        btn_manuel = QPushButton("Générer la liste")
         btn_manuel.clicked.connect(self._generer_manuel)
         ligne_scan = QHBoxLayout()
         ligne_scan.addWidget(self._btn_scan, 2)
         ligne_scan.addSpacing(12)
-        ligne_scan.addWidget(QLabel("ou"))
+        ligne_scan.addWidget(QLabel("ou, manuellement :"))
         ligne_scan.addWidget(self._nb)
-        ligne_scan.addWidget(QLabel("canaux :"))
+        ligne_scan.addWidget(QLabel("canaux"))
         ligne_scan.addWidget(btn_manuel, 1)
 
         self._statut = QLabel("")
@@ -431,6 +436,7 @@ class DvrDialog(QDialog):
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         boutons.button(QDialogButtonBox.Ok).setText("Ajouter les caméras cochées")
+        boutons.button(QDialogButtonBox.Cancel).setText("Annuler")
         boutons.accepted.connect(self._valider)
         boutons.rejected.connect(self.reject)
 
@@ -470,7 +476,8 @@ class DvrDialog(QDialog):
         if erreur:
             self._statut.setText(f"Échec : {erreur}. Utilisez la liste manuelle.")
             return
-        self._statut.setText(f"{len(canaux)} canaux trouvés. Décochez ceux à ignorer.")
+        self._statut.setText(f"{compte(len(canaux), 'canal trouvé', 'canaux trouvés')}. "
+                             "Décochez ceux à ignorer.")
         self._remplir_table(canaux)
 
     def _generer_manuel(self):
@@ -577,6 +584,7 @@ class OnvifScanDialog(QDialog):
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         boutons.button(QDialogButtonBox.Ok).setText("Ajouter les caméras cochées")
+        boutons.button(QDialogButtonBox.Cancel).setText("Annuler")
         boutons.accepted.connect(self._valider)
         boutons.rejected.connect(self.reject)
 
@@ -622,7 +630,8 @@ class OnvifScanDialog(QDialog):
             self._statut.setText("Aucune caméra détectée. Vérifiez que l'ONVIF est activé "
                                  "et que vous êtes sur le même réseau.")
             return
-        self._statut.setText(f"{len(devices)} caméras trouvées. Renseignez les identifiants puis validez.")
+        self._statut.setText(f"{compte(len(devices), 'caméra trouvée', 'caméras trouvées')}. "
+                             "Renseignez les identifiants puis validez.")
         for dev in devices:
             r = self._table.rowCount()
             self._table.insertRow(r)
@@ -649,7 +658,7 @@ class OnvifScanDialog(QDialog):
         self._resolution = True
         self._btn_scan.setEnabled(False)
         self._boutons.button(QDialogButtonBox.Ok).setEnabled(False)
-        self._statut.setText(f"Résolution des flux de {len(choisis)} caméra(s)…")
+        self._statut.setText(f"Résolution des flux de {compte(len(choisis), 'caméra')}…")
         site = self._cfg.site(self._site.currentData())
         user, pwd = self._user.text(), self._pwd.text()
         # noms saisis dans la table (peuvent avoir été édités)
@@ -767,11 +776,27 @@ class CameraManagerWidget(QWidget):
         self._btn_edit.setEnabled(actif)
         self._btn_del.setEnabled(actif)
 
-    def rafraichir(self):
+    def rafraichir(self, selection: tuple | None = None):
+        """Reconstruit l'arbre SANS perdre le contexte de lecture : sites
+        pliés/dépliés, position de défilement et sélection sont préservés
+        (auparavant tout se redéployait et il fallait re-scroller à chaque
+        ajout). `selection` = ("site"|"camera", id) sélectionne et montre un
+        élément précis, typiquement celui qui vient d'être créé."""
+        premier = self._tree.topLevelItemCount() == 0
+        deplies = {self._tree.topLevelItem(i).data(0, Qt.UserRole)[1]
+                   for i in range(self._tree.topLevelItemCount())
+                   if self._tree.topLevelItem(i).isExpanded()}
+        if selection is None:
+            selection = self._selection()
+        scroll = self._tree.verticalScrollBar().value()
+
         self._tree.clear()
+        a_montrer = None
         for site in self._cfg.sites:
             it = QTreeWidgetItem([site.nom, "site 4G" if site.lien == "4g" else "site fibre"])
             it.setData(0, Qt.UserRole, ("site", site.id))
+            if selection == ("site", site.id):
+                a_montrer = it
             for cam in [c for c in self._cfg.cameras if c.site.id == site.id]:
                 detail = (f"{cam.marque} · {cam.hote or 'URL libre'}"
                           + (f" · canal {cam.canal}" if cam.marque != "custom" else "")
@@ -779,8 +804,18 @@ class CameraManagerWidget(QWidget):
                 child = QTreeWidgetItem([cam.nom, detail])
                 child.setData(0, Qt.UserRole, ("camera", cam.id))
                 it.addChild(child)
+                if selection == ("camera", cam.id):
+                    a_montrer = child
             self._tree.addTopLevelItem(it)
-        self._tree.expandAll()
+            it.setExpanded(premier or site.id in deplies)
+
+        self._tree.verticalScrollBar().setValue(scroll)
+        if a_montrer is not None:
+            parent = a_montrer.parent()
+            if parent is not None:
+                parent.setExpanded(True)
+            self._tree.setCurrentItem(a_montrer)
+            self._tree.scrollToItem(a_montrer)
 
     def _selection(self):
         it = self._tree.currentItem()
@@ -806,9 +841,10 @@ class CameraManagerWidget(QWidget):
         dlg = SiteDialog(self)
         if dlg.exec():
             nom, lien = dlg.valeurs()
-            self._cfg.sites.append(Site(id=self._cfg.unique_id(nom), nom=nom, lien=lien))
+            site = Site(id=self._cfg.unique_id(nom), nom=nom, lien=lien)
+            self._cfg.sites.append(site)
             self.modifie = True
-            self.rafraichir()
+            self.rafraichir(selection=("site", site.id))
 
     def _ajouter_dvr(self):
         if not self._exiger_site():
@@ -816,7 +852,8 @@ class CameraManagerWidget(QWidget):
         dlg = DvrDialog(self._cfg, self, site_defaut=self._site_selectionne())
         if dlg.exec():
             self.modifie = True
-            self.rafraichir()
+            crees = dlg.cameras_creees
+            self.rafraichir(selection=("camera", crees[0].id) if crees else None)
 
     def _scan_onvif(self):
         if not self._exiger_site():
@@ -824,16 +861,16 @@ class CameraManagerWidget(QWidget):
         dlg = OnvifScanDialog(self._cfg, self, site_defaut=self._site_selectionne())
         if dlg.exec() and dlg.cameras_creees:
             self.modifie = True
-            self.rafraichir()
+            self.rafraichir(selection=("camera", dlg.cameras_creees[0].id))
 
     def _ajouter_camera(self):
         if not self._exiger_site():
             return
         dlg = CameraDialog(self._cfg, self, site_defaut=self._site_selectionne())
         if dlg.exec():
-            dlg.appliquer()
+            cam = dlg.appliquer()
             self.modifie = True
-            self.rafraichir()
+            self.rafraichir(selection=("camera", cam.id))
 
     def _modifier(self):
         sel = self._selection()
@@ -865,7 +902,7 @@ class CameraManagerWidget(QWidget):
             nb = len([c for c in self._cfg.cameras if c.site.id == ident])
             if QMessageBox.question(
                     self, "Supprimer",
-                    f"Supprimer le site « {site.nom} » et ses {nb} caméra(s) ?"
+                    f"Supprimer le site « {site.nom} » et ses {compte(nb, 'caméra')} ?"
             ) != QMessageBox.Yes:
                 return
             retirees = {c.id for c in self._cfg.cameras if c.site.id == ident}
@@ -906,12 +943,25 @@ class ConfigDialog(QDialog):
         self._rot.setRange(3, 3600)
         self._rot.setSuffix(" s")
         self._rot.setValue(cfg.rotation_duree_s)
+        self._rot.setMaximumWidth(140)
         reglages = QGroupBox("Réglages généraux")
         rg = QFormLayout(reglages)
         rg.setContentsMargins(12, 8, 12, 8)
         rg.setHorizontalSpacing(18)
         rg.setLabelAlignment(Qt.AlignLeft)
-        rg.addRow("Durée de rotation", self._rot)
+        rg.addRow("Durée de rotation :", self._rot)
+
+        # ronde lancée automatiquement à l'ouverture (réglage de CE poste) :
+        # un mur d'images redémarré reprend sa ronde sans intervention
+        from ..reglages import reglages as _reglages
+        self._settings = _reglages()
+        self._ronde_auto = QComboBox()
+        self._ronde_auto.addItem("(aucune)", "")
+        for s in cfg.sequences:
+            self._ronde_auto.addItem(s.nom, s.nom)
+        i = self._ronde_auto.findData(self._settings.value("ronde_auto", "", type=str))
+        self._ronde_auto.setCurrentIndex(max(0, i))
+        rg.addRow("Ronde au démarrage :", self._ronde_auto)
 
         # mode de fonctionnement (verrouillé : bascule réservée à un admin)
         mode = QGroupBox("Mode de fonctionnement")
@@ -940,12 +990,29 @@ class ConfigDialog(QDialog):
         self.demande_serveur = True
         self.done(2)                          # code distinct de Ok/Cancel
 
+    def reject(self):
+        # ne jamais jeter des modifications sans prévenir
+        if self._manager.modifie or self._rot.value() != self._cfg.rotation_duree_s:
+            r = QMessageBox.question(
+                self, "Modifications non enregistrées",
+                "Des modifications n'ont pas été enregistrées.\n"
+                "Enregistrer avant de fermer ?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Save)
+            if r == QMessageBox.Cancel:
+                return
+            if r == QMessageBox.Save:
+                self._terminer()
+                return
+        super().reject()
+
     def _terminer(self):
         if self._rot.value() != self._cfg.rotation_duree_s:
             self._cfg.rotation_duree_s = self._rot.value()
             self.modifie = True
         if self._manager.modifie:
             self.modifie = True
+        self._settings.setValue("ronde_auto", self._ronde_auto.currentData())
         self.accept()
 
 
@@ -958,7 +1025,7 @@ class PreferencesDialog(QDialog):
     d'administration, réservé aux comptes admin. Les boucles se modifient depuis
     le bouton « Boucles » de la barre du haut."""
 
-    def __init__(self, remote, parent=None):
+    def __init__(self, remote, parent=None, noms_rondes: list | None = None):
         super().__init__(parent)
         self._remote = remote
         self.deconnexion = False
@@ -966,18 +1033,35 @@ class PreferencesDialog(QDialog):
         self.setWindowIcon(icon("settings"))
         self.setMinimumWidth(460)
 
+        # réglage de CE poste : ronde lancée automatiquement à l'ouverture
+        from ..reglages import reglages as _reglages
+        self._settings = _reglages()
+        poste = QGroupBox("Ce poste")
+        pf = QFormLayout(poste)
+        pf.setContentsMargins(12, 8, 12, 8)
+        pf.setHorizontalSpacing(18)
+        self._ronde_auto = QComboBox()
+        self._ronde_auto.addItem("(aucune)", "")
+        for nom in (noms_rondes or []):
+            self._ronde_auto.addItem(nom, nom)
+        i = self._ronde_auto.findData(self._settings.value("ronde_auto", "", type=str))
+        self._ronde_auto.setCurrentIndex(max(0, i))
+        self._ronde_auto.currentIndexChanged.connect(
+            lambda: self._settings.setValue("ronde_auto", self._ronde_auto.currentData()))
+        pf.addRow("Ronde au démarrage :", self._ronde_auto)
+
         compte = QGroupBox("Mon compte")
         cf = QFormLayout(compte)
         cf.setContentsMargins(12, 8, 12, 8)
         cf.setHorizontalSpacing(18)
         role = "administrateur" if remote.admin else "utilisateur"
-        cf.addRow("Connecté en tant que", QLabel(f"{remote.username} ({role})"))
+        cf.addRow("Connecté en tant que :", QLabel(f"{remote.username} ({role})"))
         self._mdp_ancien = QLineEdit(); self._mdp_ancien.setEchoMode(QLineEdit.Password)
         self._mdp_nouv = QLineEdit(); self._mdp_nouv.setEchoMode(QLineEdit.Password)
         self._mdp_conf = QLineEdit(); self._mdp_conf.setEchoMode(QLineEdit.Password)
-        cf.addRow("Mot de passe actuel", self._mdp_ancien)
-        cf.addRow("Nouveau mot de passe", self._mdp_nouv)
-        cf.addRow("Confirmer", self._mdp_conf)
+        cf.addRow("Mot de passe actuel :", self._mdp_ancien)
+        cf.addRow("Nouveau mot de passe :", self._mdp_nouv)
+        cf.addRow("Confirmer :", self._mdp_conf)
         btn_mdp = QPushButton("Changer mon mot de passe")
         btn_mdp.clicked.connect(self._changer_mdp)
         cf.addRow("", btn_mdp)
@@ -991,6 +1075,7 @@ class PreferencesDialog(QDialog):
 
         lay = QVBoxLayout(self)
         lay.setSpacing(10)
+        lay.addWidget(poste)
         lay.addWidget(compte)
         lay.addWidget(btn_logout)
         lay.addStretch(1)

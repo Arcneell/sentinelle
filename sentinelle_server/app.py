@@ -193,6 +193,46 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                 resultat.append({"nom": s.get("nom", ""), "etapes": etapes})
         return resultat
 
+    def _rondes_partagees(u, visibles: set) -> list[dict]:
+        """Rondes partagées attribuées au compte, épurées des caméras non
+        visibles (mêmes règles que les boucles personnelles). Une ronde vidée
+        de toutes ses étapes n'est pas renvoyée."""
+        resultat = []
+        for s in store.cfg.sequences:
+            if not (s.tous or u.username in s.utilisateurs):
+                continue
+            etapes = []
+            for e in s.etapes:
+                cams = [c for c in e.cameras if c in visibles]
+                if cams:
+                    etapes.append({"mode": e.mode, "cameras": cams,
+                                   "duree_s": e.duree_s})
+            if etapes:
+                resultat.append({"id": s.id, "nom": s.nom, "etapes": etapes,
+                                 "partagee": True})
+        return resultat
+
+    def _valider_etapes(brut, cams_autorisees: set) -> list[dict]:
+        """Épure une liste d'étapes reçue : modes connus, caméras autorisées,
+        durées bornées. Les étapes sans caméra valide sont éliminées."""
+        etapes = []
+        for e in (brut or [])[:100]:
+            mode = str(e.get("mode", "grille"))
+            if mode not in ("grille", "mono"):
+                continue
+            cams = [str(c) for c in (e.get("cameras") or [])
+                    if str(c) in cams_autorisees]
+            if mode == "mono":
+                cams = cams[:1]
+            if not cams:
+                continue
+            try:
+                duree = max(3, min(3600, int(e.get("duree_s", 30))))
+            except (TypeError, ValueError):
+                duree = 30
+            etapes.append({"mode": mode, "cameras": cams[:16], "duree_s": duree})
+        return etapes
+
     @app.get("/api/config")
     def config_vue(request: Request):
         """Projection pour l'affichage : caméras autorisées, sans identifiant DVR."""
@@ -215,7 +255,8 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                 "snapshot": bool(c.snapshot_url()),
                 "main": f"{c.id}-main", "sub": f"{c.id}-sub",
             } for c in cams],
-            "sequences": _boucles_utilisateur(u, visibles),
+            "sequences": (_rondes_partagees(u, visibles)
+                          + _boucles_utilisateur(u, visibles)),
         }
 
     @app.put("/api/account/sequences")
@@ -233,25 +274,65 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         valides = []
         for s in brut[:50]:                              # borne raisonnable
             nom = str(s.get("nom", "")).strip()[:80]
-            etapes = []
-            for e in (s.get("etapes") or [])[:100]:
-                mode = str(e.get("mode", "grille"))
-                if mode not in ("grille", "mono"):
-                    continue
-                cams = [str(c) for c in (e.get("cameras") or []) if str(c) in visibles]
-                if mode == "mono":
-                    cams = cams[:1]
-                if not cams:
-                    continue
-                try:
-                    duree = max(3, min(3600, int(e.get("duree_s", 30))))
-                except (TypeError, ValueError):
-                    duree = 30
-                etapes.append({"mode": mode, "cameras": cams[:16], "duree_s": duree})
+            etapes = _valider_etapes(s.get("etapes"), visibles)
             if nom and etapes:
                 valides.append({"nom": nom, "etapes": etapes})
         store.users.definir_sequences(u.username, valides)
         return {"ok": True, "sequences": len(valides)}
+
+    # ------------------------------------------------------- rondes partagées
+
+    @app.get("/api/rounds")
+    def rondes_liste(request: Request):
+        """Rondes partagées complètes, avec leur attribution (administration)."""
+        exiger_admin(request)
+        return {"sequences": [{
+            "id": s.id, "nom": s.nom,
+            "etapes": [e.to_dict() for e in s.etapes],
+            "tous": s.tous, "utilisateurs": list(s.utilisateurs),
+        } for s in store.cfg.sequences]}
+
+    @app.put("/api/rounds")
+    async def rondes_remplacer(request: Request):
+        """Remplace les rondes partagées et leur attribution (administration)."""
+        exiger_admin(request)
+        try:
+            corps = await request.json()
+        except Exception:
+            raise HTTPException(400, "corps JSON invalide")
+        brut = corps.get("sequences") if isinstance(corps, dict) else None
+        if not isinstance(brut, list):
+            raise HTTPException(400, "liste de rondes attendue")
+
+        from sentinelle.config import Etape, Sequence, slugify
+        cam_ids = {c.id for c in store.cfg.cameras}
+        comptes = set(store.users.users)
+        warnings, valides, ids_pris = [], [], set()
+        for s in brut[:50]:
+            nom = str(s.get("nom", "")).strip()[:80]
+            etapes = _valider_etapes(s.get("etapes"), cam_ids)
+            if not nom or not etapes:
+                warnings.append(f"ronde '{nom or '?'}' sans étape valide — ignorée")
+                continue
+            inconnus = [str(x) for x in (s.get("utilisateurs") or [])
+                        if str(x) not in comptes]
+            if inconnus:
+                warnings.append(f"ronde '{nom}' : compte(s) inconnu(s) "
+                                f"{', '.join(inconnus[:5])} — retiré(s)")
+            ident = str(s.get("id", "")).strip() or slugify(nom)
+            cand, i = ident, 2
+            while cand in ids_pris:
+                cand, i = f"{ident}-{i}", i + 1
+            ids_pris.add(cand)
+            valides.append(Sequence(
+                nom=nom, id=cand,
+                etapes=[Etape(**e) for e in etapes],
+                tous=bool(s.get("tous", False)),
+                utilisateurs=[str(x) for x in (s.get("utilisateurs") or [])
+                              if str(x) in comptes]))
+        store.remplacer_rondes(valides)
+        logger.info(f"Rondes partagées mises à jour ({len(valides)})")
+        return {"ok": True, "sequences": len(valides), "warnings": warnings}
 
     @app.get("/api/config/full")
     def config_complete(request: Request):

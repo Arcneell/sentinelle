@@ -133,9 +133,10 @@ def _qss() -> str:
         background: transparent;
         border: none;
         border-radius: 6px;
-        padding: 6px 9px;
+        padding: 6px 8px;
         margin: 0;
     }}
+    QLabel#pageInfo {{ color: {c['text_dim']}; font-weight: 600; }}
     QToolButton:hover {{ background: {c['surface_alt']}; }}
     QToolButton:pressed {{ background: {c['elevated']}; }}
     QToolButton:checked {{ background: {c['accent']}; color: {c['on_accent']}; }}
@@ -192,7 +193,7 @@ def _qss() -> str:
         border: 1px solid {c['border']};
         border-radius: 6px;
         padding: 8px 14px;
-        text-align: left;
+        text-align: center;
     }}
     QPushButton:hover {{ background: {c['elevated']}; border-color: {c['text_faint']}; }}
     QPushButton:pressed {{ background: {c['elevated']}; }}
@@ -212,6 +213,7 @@ def _qss() -> str:
     /* ---- panneau latéral (structurel : angles droits) ---- */
     QFrame#sidebar {{ background: {c['surface']}; border-right: 1px solid {c['border']}; }}
     QFrame#sideHeader {{ border-bottom: 1px solid {c['border_soft']}; }}
+    QFrame#sideSearch {{ border-bottom: 1px solid {c['border_soft']}; }}
     QFrame#sideFooter {{ border-top: 1px solid {c['border_soft']}; }}
     QLabel#sideTitle {{
         color: {c['text_dim']}; font-weight: 700; font-size: 11px; letter-spacing: 1.5px;
@@ -243,6 +245,20 @@ def _qss() -> str:
     QHeaderView::section {{
         background: {c['surface_alt']}; color: {c['text_dim']};
         border: none; border-bottom: 1px solid {c['border_soft']}; padding: 6px 8px;
+    }}
+
+    /* ---- onglets (panneau d'administration) ---- */
+    QTabWidget::pane {{
+        border: 1px solid {c['border_soft']}; border-radius: 6px; top: -1px;
+    }}
+    QTabBar::tab {{
+        background: transparent; color: {c['text_dim']};
+        border: none; border-bottom: 2px solid transparent;
+        padding: 8px 16px; margin-right: 2px;
+    }}
+    QTabBar::tab:hover {{ color: {c['text']}; }}
+    QTabBar::tab:selected {{
+        color: {c['text']}; border-bottom: 2px solid {c['accent']};
     }}
 
     /* ---- groupes, menus, bulles ---- */

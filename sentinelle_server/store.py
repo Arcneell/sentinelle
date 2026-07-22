@@ -93,7 +93,18 @@ class Store:
                     ancien = self.cfg.camera(cam.id)
                     if ancien is not None:
                         cam.password = ancien.password
+            # les rondes partagées se gèrent par /api/rounds : la config poussée
+            # par un client n'écrase jamais celles déjà stockées (une session
+            # admin qui enregistre les caméras ne doit pas remettre un instantané
+            # périmé des rondes modifiées entre-temps)
+            nouveau.sequences = self.cfg.sequences
             nouveau.path = self.config_path
             save_config(nouveau)
             self.cfg = nouveau
             return list(nouveau.warnings)
+
+    def remplacer_rondes(self, sequences: list):
+        """Remplace les rondes partagées ([Sequence] déjà validées) et persiste."""
+        with self.lock:
+            self.cfg.sequences = list(sequences)
+            save_config(self.cfg)

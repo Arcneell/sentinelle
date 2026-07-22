@@ -96,9 +96,25 @@ class ServeurDistant:
             self.jeton = data["token"]        # la session est renouvelée
 
     def pousser_boucles(self, sequences: list):
-        """Enregistre les boucles personnelles du compte connecté."""
+        """Enregistre les rondes personnelles du compte connecté. Les rondes
+        partagées (gérées par un admin) ne transitent jamais par ici."""
         self._req("PUT", "/api/account/sequences",
-                  json={"sequences": [s.to_dict() for s in sequences]})
+                  json={"sequences": [s.to_dict() for s in sequences
+                                      if not s.partagee]})
+
+    # -------------------------------------------------------- rondes partagées
+
+    def rounds_liste(self) -> list[dict]:
+        """Rondes partagées avec attribution (administration)."""
+        return self._req("GET", "/api/rounds").json().get("sequences", [])
+
+    def rounds_pousser(self, sequences: list[dict]) -> list[str]:
+        """Remplace les rondes partagées (administration). Retourne les warnings."""
+        r = self._req("PUT", "/api/rounds", json={"sequences": sequences})
+        try:
+            return list(r.json().get("warnings") or [])
+        except Exception:
+            return []
 
     # ------------------------------------------------------------------ HTTP
 
@@ -193,7 +209,10 @@ class ServeurDistant:
                                         cameras=cams,
                                         duree_s=max(3, int(e.get("duree_s", 30)))))
             if etapes:
-                cfg.sequences.append(Sequence(nom=str(s.get("nom", "")), etapes=etapes))
+                cfg.sequences.append(Sequence(
+                    nom=str(s.get("nom", "")), etapes=etapes,
+                    id=str(s.get("id", "")),
+                    partagee=bool(s.get("partagee", False))))
         return cfg
 
     def _base_rtsp(self) -> str:
