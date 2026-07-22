@@ -72,7 +72,11 @@ The Configuration window opens on first run.
 
 > **Prefer a package?** Pre-built Linux `.deb` files are attached to every
 > [release](https://github.com/Arcneell/sentinelle/releases):
-> `sudo apt install ./sentinelle_2.1.1_amd64.deb` (pulls `libmpv2`, `libxcb-cursor0` and the VA-API drivers automatically).
+> `sudo apt install ./sentinelle_2.1.2_amd64.deb` — this is the supported install
+> path: it pulls `libmpv2`, the Qt/xcb libraries, the VA-API drivers (hard
+> dependencies) and `ffmpeg` (recommended, better failure diagnostics).
+> Plain `dpkg -i` does not resolve dependencies; if you use it, follow up with
+> `apt -f install`.
 
 ## Configuration
 
@@ -184,7 +188,8 @@ Pre-built Linux packages are attached to each
 
 ```bash
 # Linux .deb (works from Windows too, via Docker) -> dist/sentinelle_<version>_amd64.deb
-docker run --rm -v "${PWD}:/src" -w /src debian:12 bash packaging/build_deb.sh
+# Build on the SAME Debian release as the target machines (Debian 13/trixie).
+docker run --rm -v "${PWD}:/src" -w /src debian:13 bash packaging/build_deb.sh
 ```
 
 ```powershell
@@ -198,9 +203,12 @@ routinely blocked by endpoint protection (Symantec Endpoint Protection & co.). W
 certificate it still builds, unsigned.
 
 Installed `.deb`: launch **Sentinelle** from the applications menu or the `sentinelle`
-command (Debian 12+ / Ubuntu 24.04+). On a Wayland session (GNOME's default) the app
-automatically runs under XWayland (`QT_QPA_PLATFORM=xcb`) so video renders — set that
-variable yourself only to override the auto-detection.
+command (Debian 13 / Ubuntu 24.04+). On a Wayland session (GNOME's default) the app
+automatically requests XWayland (`QT_QPA_PLATFORM=xcb;wayland`, i.e. xcb with a wayland
+fallback) so video renders — set that variable yourself only to override the
+auto-detection. If it ends up on native Wayland (video unavailable), the app now says so
+at startup. If the GPU driver makes video crash the machine, right-click the launcher
+icon and pick **Safe video mode**, or run `sentinelle --safe-video`.
 
 ## Architecture
 

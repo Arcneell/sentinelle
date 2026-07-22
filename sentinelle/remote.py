@@ -15,7 +15,6 @@ import logging
 import os
 import tempfile
 import threading
-import time
 from urllib.parse import quote, urlparse
 
 import requests
@@ -148,11 +147,8 @@ class ServeurDistant:
         self.username = compte.get("username", self.username)
 
         relay = p.get("relay") or {}
-        hote = urlparse(self.base).hostname or "localhost"
-        # le jeton de session sert de mot de passe RTSP : le relais l'envoie à
-        # l'API qui vérifie les droits de l'utilisateur sur la caméra demandée
-        cred = f"sentinelle:{quote(self.jeton, safe='')}@"
-        base_rtsp = f"rtsp://{cred}{hote}:{int(relay.get('port', 8554))}/"
+        self._relay_port = int(relay.get("port", 8554))
+        base_rtsp = self._base_rtsp()
 
         from .config import Site
         for s in p.get("sites") or []:
@@ -179,6 +175,11 @@ class ServeurDistant:
             # attributs transitoires du mode serveur (jamais persistés)
             cam.remote = self
             cam.remote_onvif = bool(c.get("onvif"))
+            # chemins bruts du relais : permettent de régénérer les URLs en
+            # place quand le jeton est rafraîchi (voir maj_jeton_urls)
+            cam._relay_main = str(c.get("main", ""))
+            cam._relay_sub = str(c.get("sub", ""))
+            cam._relay_snapshot = bool(c.get("snapshot"))
             cfg.cameras.append(cam)
 
         from .config import Etape, Sequence
@@ -194,6 +195,31 @@ class ServeurDistant:
             if etapes:
                 cfg.sequences.append(Sequence(nom=str(s.get("nom", "")), etapes=etapes))
         return cfg
+
+    def _base_rtsp(self) -> str:
+        """Préfixe RTSP du relais. Le jeton de session sert de mot de passe :
+        le relais l'envoie à l'API qui vérifie les droits sur la caméra."""
+        hote = urlparse(self.base).hostname or "localhost"
+        cred = f"sentinelle:{quote(self.jeton, safe='')}@"
+        return f"rtsp://{cred}{hote}:{getattr(self, '_relay_port', 8554)}/"
+
+    def maj_jeton_urls(self, cfg: AppConfig):
+        """Après un rafraîchissement du jeton : met à jour EN PLACE les URLs et
+        identifiants des caméras (le jeton y est incrusté), SANS reconstruire le
+        mur. Le relais ne vérifie le jeton qu'à l'OUVERTURE d'un flux : les
+        lectures en cours survivent, seules les (re)connexions futures ont
+        besoin du jeton frais — les tuiles re-résolvent leur URL à chaque
+        tentative."""
+        base_rtsp = self._base_rtsp()
+        for cam in cfg.cameras:
+            if getattr(cam, "remote", None) is not self:
+                continue
+            if getattr(cam, "_relay_main", ""):
+                cam.url_mainstream = base_rtsp + cam._relay_main
+            if getattr(cam, "_relay_sub", ""):
+                cam.url_substream = base_rtsp + cam._relay_sub
+            if getattr(cam, "_relay_snapshot", False):
+                cam.password = self.jeton
 
     def config_admin(self) -> AppConfig:
         """Configuration complète pour l'édition (mots de passe vides = conservés)."""
@@ -253,21 +279,27 @@ class EcouteurMouvement(QObject):
     def __init__(self, serveur: ServeurDistant, parent=None):
         super().__init__(parent)
         self._serveur = serveur
-        self._stop = threading.Event()
+        self._stop_evt: threading.Event | None = None
         self._thread: threading.Thread | None = None
         self._resp = None
 
     def surveiller(self, _cameras=None):
-        """Démarre l'écoute (la liste des caméras est gérée côté serveur)."""
+        """Démarre l'écoute (la liste des caméras est gérée côté serveur).
+
+        Un Event d'arrêt NEUF est créé à chaque démarrage et passé au thread :
+        réutiliser (et ré-armer) un Event partagé « ressuscitait » l'ancien
+        thread encore bloqué dans iter_lines — double écoute et stop() cassé."""
         if self._thread is not None and self._thread.is_alive():
             return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._boucle, daemon=True,
-                                        name="motion-sse")
+        ev = threading.Event()
+        self._stop_evt = ev
+        self._thread = threading.Thread(target=self._boucle, args=(ev,),
+                                        daemon=True, name="motion-sse")
         self._thread.start()
 
     def stop(self):
-        self._stop.set()
+        if self._stop_evt is not None:
+            self._stop_evt.set()
         resp = self._resp
         if resp is not None:
             try:
@@ -276,8 +308,10 @@ class EcouteurMouvement(QObject):
                 pass
         self._thread = None
 
-    def _boucle(self):
-        while not self._stop.is_set():
+    def _boucle(self, ev: threading.Event):
+        echecs = 0
+        while not ev.is_set():
+            r = None
             try:
                 r = requests.get(
                     self._serveur.url_events(),
@@ -286,8 +320,9 @@ class EcouteurMouvement(QObject):
                 if r.status_code != 200:
                     raise ErreurServeur(f"HTTP {r.status_code}")
                 self._resp = r
+                echecs = 0
                 for ligne in r.iter_lines():
-                    if self._stop.is_set():
+                    if ev.is_set():
                         return
                     if not ligne or not ligne.startswith(b"data:"):
                         continue                      # keepalives / commentaires
@@ -302,9 +337,13 @@ class EcouteurMouvement(QObject):
                     except RuntimeError:
                         return                        # objet Qt détruit
             except Exception as e:
-                if self._stop.is_set():
+                if ev.is_set():
                     return
+                echecs += 1
                 logger.info(f"Événements serveur interrompus ({e}) — reconnexion")
-                time.sleep(2)
+                ev.wait(min(2 ** echecs, 60))         # backoff, arrêt réactif
             finally:
-                self._resp = None
+                # ne nettoyer que SA réponse : un ancien thread qui finit de
+                # mourir ne doit pas effacer celle du thread relancé entre-temps
+                if self._resp is r:
+                    self._resp = None

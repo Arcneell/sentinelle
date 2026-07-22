@@ -109,6 +109,16 @@ def app_data_dir() -> str:
     return os.path.join(base, APP_DIR_NIX)
 
 
+def app_state_dir() -> str:
+    """Dossier d'état (journaux) : ~/.local/state/sentinelle sous Linux (spec
+    XDG — un journal qui tourne n'a rien à faire dans ~/.config, qui part dans
+    les sauvegardes/synchros), même dossier que la config sous Windows."""
+    if sys.platform == "win32":
+        return app_data_dir()
+    base = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+    return os.path.join(base, APP_DIR_NIX)
+
+
 def migrer_ancien_dossier():
     """Renomme l'ancien dossier RTSP-TOOL en Sentinelle (une fois)."""
     nouveau = app_data_dir()
