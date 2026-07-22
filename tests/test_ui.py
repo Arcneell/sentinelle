@@ -50,7 +50,7 @@ def test_fenetre_principale(tmp_path):
     win.close()
 
 
-def test_grille_redemarre_apres_mono(tmp_path):
+def test_grille_redemarre_apres_mono(tmp_path, monkeypatch):
     """Régression : une tuile conservée d'une étape mono doit repartir quand la
     grille est réaffichée (ne pas rester « en pause »).
 
@@ -81,6 +81,21 @@ def test_grille_redemarre_apres_mono(tmp_path):
             self.shutdown()
             self.deleteLater()
 
+    # config vide au premier lancement → la fenêtre planifie l'ouverture du
+    # dialogue Configuration (QTimer). Le test pompe la boucle d'événements
+    # (démarrages de tuiles échelonnés) : sans ce faux dialogue, le modal
+    # s'ouvrirait pendant l'attente et bloquerait le test.
+    class FakeConfigDialog:
+        demande_serveur = False
+        modifie = False
+
+        def __init__(self, cfg, parent=None):
+            pass
+
+        def exec(self):
+            return 0
+    monkeypatch.setattr("sentinelle.ui.main_window.ConfigDialog", FakeConfigDialog)
+
     win = MainWindow(str(tmp_path / "config.yaml"))
     site = Site(id="s1", nom="S", lien="fibre")
     win._cfg.sites.append(site)
@@ -91,11 +106,25 @@ def test_grille_redemarre_apres_mono(tmp_path):
     save_config(win._cfg)
     win._make_tile = lambda cam, vue: FakeTile(cam)   # pas de flux réel
 
+    def attendre_demarrages(timeout_s=3.0):
+        """Les démarrages sont échelonnés par QTimer : pomper la boucle
+        d'événements jusqu'à ce que toutes les tuiles soient parties."""
+        import time
+        from PySide6.QtCore import QCoreApplication
+        fin = time.time() + timeout_s
+        while time.time() < fin:
+            QCoreApplication.processEvents()
+            if all(t.state != TileState.IDLE for t in win._tiles.values()):
+                return
+            time.sleep(0.02)
+
     win._set_grid(["c1", "c2"])
+    attendre_demarrages()
     assert all(t.state == TileState.CONNECTING for t in win._tiles.values())
     win._set_mono("c1")                       # stoppe les tuiles grille conservées
     win._leave_mono()
     win._set_grid(["c1", "c2"])               # doit les relancer
+    attendre_demarrages()
     for cam_id, tile in win._tiles.items():
         assert tile.state != TileState.IDLE, f"{cam_id} restée à l'arrêt"
     win.close()

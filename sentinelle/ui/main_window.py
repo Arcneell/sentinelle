@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 MAX_TILES = 16
 CAP_CHOICES = [("Auto (16 max)", 16), ("1×1", 1), ("2×2", 4), ("3×3", 9), ("4×4", 16)]
+# espacement entre deux démarrages de tuiles (voir _set_grid) : assez long pour
+# sérialiser les initialisations VA-API, assez court pour remplir un mur de 16
+# en ~3 s
+ESPACEMENT_DEMARRAGE_MS = 200
 
 
 class MainWindow(QMainWindow):
@@ -1035,12 +1039,31 @@ class MainWindow(QMainWindow):
         # le winId() d'une fenêtre native créée hors hiérarchie, puis reparentée
         # — identifiant potentiellement recréé sous X11, donc wid mpv périmé.
         # Relance aussi toute tuile conservée à l'arrêt (retour de vue mono).
+        # Démarrages ÉCHELONNÉS : 16 mpv qui initialisent VA-API et ouvrent leur
+        # flux au même instant se marchent dessus sur un iGPU d'entrée de gamme —
+        # les initialisations perdantes retombent DÉFINITIVEMENT en décodage
+        # logiciel (constaté sur mur N4020 : 3 tuiles en vaapi, 13 en logiciel).
         if not paused:
+            attente = 0
             for tile in self._tiles.values():
                 if tile.state == TileState.IDLE:
-                    tile.start()
+                    self._start_tuile_differe(tile, attente)
+                    attente += ESPACEMENT_DEMARRAGE_MS
         self._grid_dirty = False
         self._update_status()
+
+    def _start_tuile_differe(self, tile, delai_ms: int):
+        """Démarre une tuile après delai_ms, si elle est toujours affichée et à
+        l'arrêt (la grille a pu être reconstruite entre-temps). Le QTimer est lié
+        à la tuile : détruite, le rappel n'est jamais invoqué."""
+        if delai_ms <= 0:
+            tile.start()
+            return
+
+        def go(t=tile):
+            if t in self._tiles.values() and t.state == TileState.IDLE:
+                t.start()
+        QTimer.singleShot(delai_ms, tile, go)
 
     # ------------------------------------------------------------------- mono
 

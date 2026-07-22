@@ -69,6 +69,9 @@ jobs:
             XCB=$(find /opt/sentinelle -name libqxcb.so | head -1)
             test -n "$XCB"
             ldd "$XCB" | (! grep "not found")
+            # la pile vidéo ne doit JAMAIS être embarquée : une libmpv/libva du
+            # bundle masque celles du système et casse VA-API (tuiles noires)
+            test -z "$(find /opt/sentinelle -name "libmpv.so*" -o -name "libva.so*" -o -name "libavcodec.so*")"
             # --help traverse le bootloader PyInstaller + argparse sans écran
             /opt/sentinelle/sentinelle --help
             # démarrage réel de Qt : atteindre la boucle d événements (124 = timeout)

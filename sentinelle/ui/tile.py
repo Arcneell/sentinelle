@@ -632,6 +632,13 @@ class VideoTile(QFrame):
         # appelé depuis le thread mpv — deque est thread-safe pour append
         if level in ("error", "warn", "fatal"):
             self._log_tail.append(f"{component}: {message}")
+            # visibles dans le journal en --verbose : sans cela, la RAISON d'un
+            # échec VA-API (ou de tout repli silencieux de mpv) restait
+            # enfermée dans le tooltip de la tuile
+            if (level != "warn" or "vaapi" in component
+                    or "vaapi" in message.lower() or "hwdec" in message.lower()):
+                logger.debug(f"[{self.camera.id}] mpv {level} "
+                             f"[{component}] {message.strip()}")
 
     def _on_playing(self, gen: int):
         # événement d'une connexion précédente (retry/reconnexion entre-temps) → ignorer

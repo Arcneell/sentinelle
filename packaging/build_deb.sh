@@ -16,15 +16,27 @@ PKG=sentinelle_${VERSION}_${ARCH}
 # libpythonX.Y (celle de l'interpréteur du système : 3.11 sur bookworm, 3.13
 # sur trixie…) : requise par PyInstaller ; libgl1/libegl1/… : requises pour
 # que les hooks PyInstaller puissent charger PySide6 pendant l'analyse.
+# libmpv2 volontairement ABSENTE du conteneur de build : si elle est présente,
+# PyInstaller suit le chargement ctypes de python-mpv et embarque libmpv + toute
+# sa pile ffmpeg/libva (~70 Mo). Cette libva embarquée masquait celle du système
+# (LD_LIBRARY_PATH du bootloader) et cassait VA-API sur les postes : repli
+# silencieux en décodage logiciel, 16 flux sur 2 cœurs, tuiles noires (vécu sur
+# mur N4020). La pile vidéo doit venir des Depends du paquet, pas du bundle.
 if ! command -v python3 >/dev/null; then
     apt-get update
     apt-get install -y --no-install-recommends python3
+fi
+if dpkg -s libmpv2 >/dev/null 2>&1; then
+    echo "ERREUR : libmpv2 est installée dans l'environnement de build —" >&2
+    echo "PyInstaller l'embarquerait et casserait VA-API sur les postes." >&2
+    echo "Construire dans un conteneur debian:13 nu (voir l'en-tête)." >&2
+    exit 1
 fi
 PYV=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 if ! dpkg -s "libpython${PYV}" >/dev/null 2>&1; then
     apt-get update
     apt-get install -y --no-install-recommends \
-        python3-venv python3-pip "libpython${PYV}" binutils libmpv2 \
+        python3-venv python3-pip "libpython${PYV}" binutils \
         libgl1 libegl1 libglib2.0-0 libxkbcommon0 libdbus-1-3 libfontconfig1
 fi
 
@@ -34,6 +46,15 @@ python3 -m venv /tmp/venv
 /tmp/venv/bin/pyinstaller --noconfirm --windowed --name sentinelle \
     --add-data "sentinelle/ui/sentinelle.png:sentinelle/ui" \
     --distpath /tmp/dist --workpath /tmp/build run.py
+
+# GARDE-FOU : aucune bibliothèque de la pile vidéo ne doit être embarquée —
+# elle court-circuiterait libmpv2/va-driver-all installés par les Depends.
+for lib in libmpv libva libavcodec; do
+    if compgen -G "/tmp/dist/sentinelle/_internal/${lib}*" > /dev/null; then
+        echo "ERREUR : ${lib}* trouvée dans le bundle PyInstaller." >&2
+        exit 1
+    fi
+done
 
 # --- arborescence du paquet ---
 ROOT=/tmp/${PKG}
