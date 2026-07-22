@@ -35,9 +35,12 @@ fi
 PYV=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 if ! dpkg -s "libpython${PYV}" >/dev/null 2>&1; then
     apt-get update
+    # libgssapi-krb5-2 : requise par PySide6.QtNetwork (hook PyInstaller) —
+    # elle arrivait par ricochet avec libmpv2, désormais bannie du build.
     apt-get install -y --no-install-recommends \
         python3-venv python3-pip "libpython${PYV}" binutils \
-        libgl1 libegl1 libglib2.0-0 libxkbcommon0 libdbus-1-3 libfontconfig1
+        libgl1 libegl1 libglib2.0-0 libxkbcommon0 libdbus-1-3 libfontconfig1 \
+        libgssapi-krb5-2
 fi
 
 # --- binaire PyInstaller ---
