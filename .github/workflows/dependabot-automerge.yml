@@ -20,7 +20,7 @@ jobs:
     steps:
       - name: Métadonnées de la mise à jour
         id: meta
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@v3
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
