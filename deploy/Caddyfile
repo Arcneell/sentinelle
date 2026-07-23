@@ -12,7 +12,7 @@
 # domaine par l'adresse et utilisez `tls internal` (Caddy génère une autorité
 # locale) :
 #
-#     https://10.0.0.200 {
+#     https://192.0.2.10 {
 #         tls internal
 #         reverse_proxy api:8080
 #     }

@@ -28,6 +28,20 @@ logger = logging.getLogger(__name__)
 TIMEOUT = (3.05, 10)
 
 
+def _json(r: "requests.Response") -> dict:
+    """Décode une réponse JSON en levant ErreurServeur si le corps n'en est pas
+    un. Un portail captif ou un proxy 4G peut répondre 200 avec du HTML : sans
+    cette garde, le JSONDecodeError non typé tuerait silencieusement le thread
+    appelant (boîte de connexion figée sur « Connexion… », sans message)."""
+    try:
+        data = r.json()
+    except ValueError:
+        raise ErreurServeur("réponse du serveur illisible (pas du JSON)")
+    if not isinstance(data, dict):
+        raise ErreurServeur("réponse du serveur inattendue")
+    return data
+
+
 class ErreurServeur(RuntimeError):
     """Serveur injoignable ou réponse invalide."""
 
@@ -76,8 +90,15 @@ class ServeurDistant:
                 pass
             # ex. 429 : « trop de tentatives — réessayez dans Ns »
             raise ErreurServeur(detail or f"HTTP {r.status_code}")
-        data = r.json()
+        data = _json(r)
         self.jeton = data.get("token", "")
+        # jeton relay (mot de passe RTSP) rafraîchi EN MÊME TEMPS que la session :
+        # sinon un renouvellement silencieux laisserait le mot de passe RTSP
+        # d'origine expirer et couperait tous les flux. Conservé si absent (ancien
+        # serveur) — jamais remplacé par le jeton de session (fuirait sur le fil).
+        rt = data.get("relay_token")
+        if rt:
+            self._relay_jeton = rt
         self.username = data.get("username", username)
         self.role = data.get("role", "user")
         return data
@@ -85,15 +106,27 @@ class ServeurDistant:
     def session_reste(self) -> int | None:
         """Secondes restant avant expiration du jeton (None si non fourni).
         Lève JetonInvalide si la session n'est plus valable."""
-        data = self._req("GET", "/api/session").json()
+        data = _json(self._req("GET", "/api/session"))
         reste = data.get("reste_s")
         return int(reste) if reste is not None else None
 
     def changer_mot_de_passe(self, ancien: str, nouveau: str):
-        data = self._req("POST", "/api/account/password",
-                         json={"ancien": ancien, "nouveau": nouveau}).json()
+        data = _json(self._req("POST", "/api/account/password",
+                               json={"ancien": ancien, "nouveau": nouveau}))
         if data.get("token"):
             self.jeton = data["token"]        # la session est renouvelée
+        # le changement de mot de passe invalide TOUS les jetons (signature liée
+        # au hash) : rafraîchir aussi le jeton relay, sinon le RTSP tombe en 401
+        if data.get("relay_token"):
+            self._relay_jeton = data["relay_token"]
+
+    def deconnecter(self):
+        """Révoque la session côté serveur (déconnexion de tous les appareils).
+        Sans effet si le serveur ne connaît pas l'endpoint (version ancienne)."""
+        try:
+            self._req("POST", "/api/account/logout")
+        except ErreurServeur:
+            pass
 
     def pousser_boucles(self, sequences: list):
         """Enregistre les rondes personnelles du compte connecté. Les rondes
@@ -106,7 +139,7 @@ class ServeurDistant:
 
     def rounds_liste(self) -> list[dict]:
         """Rondes partagées avec attribution (administration)."""
-        return self._req("GET", "/api/rounds").json().get("sequences", [])
+        return _json(self._req("GET", "/api/rounds")).get("sequences", [])
 
     def rounds_pousser(self, sequences: list[dict]) -> list[str]:
         """Remplace les rondes partagées (administration). Retourne les warnings."""
@@ -142,7 +175,7 @@ class ServeurDistant:
     # ------------------------------------------------------------ utilisateurs
 
     def users_liste(self) -> list[dict]:
-        return self._req("GET", "/api/users").json().get("users", [])
+        return _json(self._req("GET", "/api/users")).get("users", [])
 
     def users_pousser(self, users: list[dict]) -> list[str]:
         r = self._req("PUT", "/api/users", json={"users": users})
@@ -155,7 +188,7 @@ class ServeurDistant:
 
     def config_vue(self) -> AppConfig:
         """Projection pour l'affichage : caméras pointant vers le relais."""
-        p = self._req("GET", "/api/config").json()
+        p = _json(self._req("GET", "/api/config"))
         cfg = AppConfig(path="")
         cfg.rotation_duree_s = max(3, int(p.get("rotation_duree_s", 20)))
         compte = p.get("compte") or {}
@@ -164,6 +197,11 @@ class ServeurDistant:
 
         relay = p.get("relay") or {}
         self._relay_port = int(relay.get("port", 8554))
+        # jeton de portée « relay » = mot de passe RTSP, distinct du jeton de
+        # session. JAMAIS de repli sur le jeton de session : l'employer comme mot
+        # de passe RTSP le ferait transiter en clair sur le fil (flux non
+        # chiffré) et anéantirait le cloisonnement des portées.
+        self._relay_jeton = str(relay.get("token") or "")
         base_rtsp = self._base_rtsp()
 
         from .config import Site
@@ -216,10 +254,13 @@ class ServeurDistant:
         return cfg
 
     def _base_rtsp(self) -> str:
-        """Préfixe RTSP du relais. Le jeton de session sert de mot de passe :
-        le relais l'envoie à l'API qui vérifie les droits sur la caméra."""
+        """Préfixe RTSP du relais. Le mot de passe est le jeton de portée
+        « relay » (pas le jeton de session) : le relais l'envoie à l'API qui
+        vérifie les droits sur la caméra. Cloisonné pour qu'une capture du flux
+        RTSP non chiffré ne donne pas accès à l'API HTTP."""
         hote = urlparse(self.base).hostname or "localhost"
-        cred = f"sentinelle:{quote(self.jeton, safe='')}@"
+        jeton_relay = getattr(self, "_relay_jeton", "")   # jamais self.jeton (fuite)
+        cred = f"sentinelle:{quote(jeton_relay, safe='')}@"
         return f"rtsp://{cred}{hote}:{getattr(self, '_relay_port', 8554)}/"
 
     def maj_jeton_urls(self, cfg: AppConfig):
@@ -242,7 +283,7 @@ class ServeurDistant:
 
     def config_admin(self) -> AppConfig:
         """Configuration complète pour l'édition (mots de passe vides = conservés)."""
-        data = self._req("GET", "/api/config/full").json()
+        data = _json(self._req("GET", "/api/config/full"))
         fd, tmp = tempfile.mkstemp(suffix=".yaml", prefix="sentinelle-admin-")
         os.close(fd)
         try:

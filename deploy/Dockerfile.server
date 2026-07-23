@@ -15,4 +15,11 @@ COPY sentinelle_server/ sentinelle_server/
 ENV SENTINELLE_DATA=/data
 EXPOSE 8080
 
+# tourner sans privilège : le processus applicatif n'a aucun besoin de root.
+# UID/GID fixes (10001) pour que le volume ./data monté soit accessible.
+RUN groupadd -g 10001 sentinelle \
+    && useradd -u 10001 -g 10001 -m -s /usr/sbin/nologin sentinelle \
+    && mkdir -p /data && chown -R sentinelle:sentinelle /data
+USER sentinelle
+
 CMD ["python", "-m", "sentinelle_server"]

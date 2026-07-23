@@ -28,7 +28,10 @@ if (-not (Test-Path "lib/libmpv-2.dll")) {
 
 # --- dépendances de build ---
 python -m pip install --quiet --upgrade pip
-python -m pip install --quiet -r requirements.txt pyinstaller
+# PyInstaller épinglé sur la même majeure que le build .deb (build_deb.sh) :
+# une majeure différente entre .exe et .deb livrés donnerait des comportements
+# de bootloader divergents entre les deux plateformes.
+python -m pip install --quiet -r requirements.txt "pyinstaller==6.*"
 
 # --- build ---
 pyinstaller --noconfirm --windowed --name Sentinelle --icon packaging/sentinelle.ico `

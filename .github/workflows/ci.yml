@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main ]
 
+# lecture seule par défaut : un step compromis n'obtient pas d'accès en écriture
+# au dépôt (le jeton hérite sinon des permissions par défaut du dépôt).
+permissions:
+  contents: read
+
 jobs:
   tests:
     runs-on: ubuntu-latest

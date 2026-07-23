@@ -153,12 +153,25 @@ def slugify(nom: str) -> str:
 
 
 def mask_url(url: str) -> str:
-    """rtsp://user:pass@host → rtsp://user:***@host (pour logs et UI)."""
-    if "@" in url and "://" in url:
-        scheme, rest = url.split("://", 1)
-        creds, host = rest.rsplit("@", 1)
-        return f"{scheme}://{creds.split(':', 1)[0]}:***@{host}"
-    return url
+    """rtsp://user:pass@host → rtsp://user:***@host (pour logs et UI).
+
+    Passe par urlparse pour isoler l'hôte du reste : un « @ » présent ailleurs
+    que dans les identifiants (dans le chemin/la requête) ne fausse plus l'hôte
+    affiché dans les journaux."""
+    from urllib.parse import urlparse, urlunparse
+    try:
+        p = urlparse(url)
+        if not p.password:
+            return url
+        hote = p.hostname or ""
+        if ":" in hote:                          # IPv6 littéral → crochets
+            hote = f"[{hote}]"
+        # p.port lève ValueError si le port n'est pas numérique : sous le try
+        netloc = hote + (f":{p.port}" if p.port else "")
+    except ValueError:
+        return url
+    netloc = f"{p.username or ''}:***@{netloc}"
+    return urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
 
 
 # ---------------------------------------------------------------- structures

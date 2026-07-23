@@ -11,12 +11,15 @@ avec gestion des erreurs ; la fenêtre ne se ferme pas si un envoi échoue, et
 une fermeture avec des modifications en attente demande confirmation.
 """
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QFormLayout, QGroupBox, QHBoxLayout,
-                               QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMessageBox, QPushButton,
-                               QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+import threading
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
+                               QDialogButtonBox, QFormLayout, QGroupBox,
+                               QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMessageBox,
+                               QPushButton, QSpinBox, QTabWidget, QVBoxLayout,
+                               QWidget)
 
 from ..config import AppConfig, Etape, Sequence
 from .camera_picker import CameraPicker
@@ -116,12 +119,15 @@ class UserEditDialog(QDialog):
 class UsersWidget(QWidget):
     """Liste des comptes + création / édition / suppression."""
 
+    _charge = Signal(object, str)               # (users|None, erreur) — thread → UI
+
     def __init__(self, remote, cfg: AppConfig, parent=None):
         super().__init__(parent)
         self._remote = remote
         self._cfg = cfg
         self.modifie = False
         self._users: list[dict] = []
+        self._charge.connect(self._on_charge)
 
         self._liste = QListWidget()
         self._liste.itemDoubleClicked.connect(lambda *_: self._modifier())
@@ -148,12 +154,41 @@ class UsersWidget(QWidget):
         return [u["username"] for u in self._users]
 
     def _charger(self):
-        from ..remote import ErreurServeur
-        try:
-            self._users = self._remote.users_liste()
-        except ErreurServeur as e:
-            QMessageBox.warning(self, "Utilisateurs", f"Chargement impossible : {e}")
+        """Charge les comptes HORS du thread UI (l'appel gelait l'ouverture du
+        panneau d'administration sur réseau lent)."""
+        self._liste.clear()
+        self._liste.addItem("Chargement…")
+        # désactivé pendant le chargement : sinon un ajout/édition local serait
+        # écrasé par la réponse serveur qui arrive après (perte silencieuse)
+        self.setEnabled(False)
+        remote = self._remote
+
+        def work():
+            from ..remote import ErreurServeur
+            data, err, ok = None, "", False
+            try:
+                data = remote.users_liste()
+                ok = True
+            except ErreurServeur as e:
+                err = str(e) or "serveur injoignable"
+            except Exception as e:
+                err = str(e) or "erreur inattendue"
+            finally:
+                if not ok and not err:
+                    err = "erreur inattendue"
+                try:
+                    self._charge.emit(data, err) # finally : réactive toujours le widget
+                except RuntimeError:
+                    pass                         # widget détruit entre-temps
+        threading.Thread(target=work, daemon=True, name="admin-users").start()
+
+    def _on_charge(self, data, err: str):
+        self.setEnabled(True)
+        if err:
+            QMessageBox.warning(self, "Utilisateurs", f"Chargement impossible : {err}")
             self._users = []
+        else:
+            self._users = data or []
         self._rafraichir()
 
     def _rafraichir(self, selection: str | None = None):
@@ -233,18 +268,9 @@ class UsersWidget(QWidget):
         self.modifie = True
         self._rafraichir()
 
-    def pousser(self) -> bool:
-        """Envoie les comptes au serveur. Retourne True si tout s'est bien passé."""
-        from ..remote import ErreurServeur
-        try:
-            warnings = self._remote.users_pousser(self._users)
-        except ErreurServeur as e:
-            QMessageBox.critical(self, "Utilisateurs", f"Enregistrement impossible :\n{e}")
-            return False
-        if warnings:
-            QMessageBox.warning(self, "Utilisateurs — avertissements",
-                                "\n".join(warnings[:20]))
-        return True
+    def donnees(self) -> list[dict]:
+        """Comptes à envoyer au serveur (sans effet de bord réseau)."""
+        return list(self._users)
 
 
 class RondesWidget(QWidget):
@@ -252,6 +278,8 @@ class RondesWidget(QWidget):
 
     Une ronde attribuée apparaît automatiquement chez les comptes concernés
     (filtrée à leurs caméras autorisées), sans qu'ils aient à la recréer."""
+
+    _charge = Signal(object, str)               # (rondes brutes|None, erreur)
 
     def __init__(self, remote, cfg: AppConfig, users_widget: UsersWidget,
                  parent=None):
@@ -261,6 +289,7 @@ class RondesWidget(QWidget):
         self._users_widget = users_widget       # source des comptes (à jour)
         self.modifie = False
         self._rondes: list[Sequence] = []
+        self._charge.connect(self._on_charge)
 
         # ---- colonne de gauche : liste des rondes ----
         self._liste = QListWidget()
@@ -311,14 +340,38 @@ class RondesWidget(QWidget):
     # ------------------------------------------------------------- chargement
 
     def _charger(self):
-        from ..remote import ErreurServeur
-        try:
-            brut = self._remote.rounds_liste()
-        except ErreurServeur as e:
-            QMessageBox.warning(self, "Rondes", f"Chargement impossible : {e}")
+        """Charge les rondes partagées HORS du thread UI."""
+        self._liste.clear()
+        self._liste.addItem("Chargement…")
+        self.setEnabled(False)                   # cf. UsersWidget : anti-écrasement
+        remote = self._remote
+
+        def work():
+            from ..remote import ErreurServeur
+            brut, err, ok = None, "", False
+            try:
+                brut = remote.rounds_liste()
+                ok = True
+            except ErreurServeur as e:
+                err = str(e) or "serveur injoignable"
+            except Exception as e:
+                err = str(e) or "erreur inattendue"
+            finally:
+                if not ok and not err:
+                    err = "erreur inattendue"
+                try:
+                    self._charge.emit(brut, err)
+                except RuntimeError:
+                    pass
+        threading.Thread(target=work, daemon=True, name="admin-rondes").start()
+
+    def _on_charge(self, brut, err: str):
+        self.setEnabled(True)
+        if err:
+            QMessageBox.warning(self, "Rondes", f"Chargement impossible : {err}")
             brut = []
         self._rondes = []
-        for s in brut:
+        for s in (brut or []):
             self._rondes.append(Sequence(
                 nom=str(s.get("nom", "")), id=str(s.get("id", "")),
                 etapes=[Etape(mode=str(e.get("mode", "grille")),
@@ -451,30 +504,22 @@ class RondesWidget(QWidget):
         self.modifie = True
         self._maj_liste()
 
-    def pousser(self) -> bool:
-        """Envoie les rondes partagées au serveur."""
-        from ..remote import ErreurServeur
-        data = [{"id": s.id, "nom": s.nom,
+    def donnees(self) -> list[dict]:
+        """Rondes (avec étapes) à envoyer — sans effet de bord réseau."""
+        return [{"id": s.id, "nom": s.nom,
                  "etapes": [e.to_dict() for e in s.etapes],
                  "tous": s.tous, "utilisateurs": list(s.utilisateurs)}
                 for s in self._rondes if s.etapes]
-        vides = [s.nom for s in self._rondes if not s.etapes]
-        try:
-            warnings = self._remote.rounds_pousser(data)
-        except ErreurServeur as e:
-            QMessageBox.critical(self, "Rondes", f"Enregistrement impossible :\n{e}")
-            return False
-        if vides:
-            warnings = list(warnings) + [f"ronde '{n}' sans étape — non enregistrée"
-                                         for n in vides]
-        if warnings:
-            QMessageBox.warning(self, "Rondes — avertissements",
-                                "\n".join(warnings[:20]))
-        return True
+
+    def vides(self) -> list[str]:
+        """Noms des rondes sans étape (non enregistrées, signalées à l'admin)."""
+        return [s.nom for s in self._rondes if not s.etapes]
 
 
 class AdminDialog(QDialog):
     """Panneau d'administration global (onglets)."""
+
+    _sauve_termine = Signal(list)       # [(etape, ok, warnings, err)] — thread → UI
 
     def __init__(self, cfg: AppConfig, remote, parent=None):
         super().__init__(parent)
@@ -483,6 +528,8 @@ class AdminDialog(QDialog):
         self.recharger = False          # signale à la fenêtre de recharger
         self.enregistre = False         # au moins un envoi a réussi
         self.demande_mode = None        # "local" | "serveur" : bascule demandée
+        self._sauvegarde_en_cours = False
+        self._sauve_termine.connect(self._on_sauve_termine)
         self.setWindowTitle("Administration du serveur")
         self.setWindowIcon(icon("settings"))
         self.setMinimumSize(820, 660)
@@ -492,6 +539,9 @@ class AdminDialog(QDialog):
         self._tabs.addTab(self._manager, icon("camera"), "Caméras et sites")
         self._users = UsersWidget(remote, cfg, self)
         self._rondes = RondesWidget(remote, cfg, self._users, self)
+        # les comptes se chargent en arrière-plan : réaligner l'attribution des
+        # rondes dès qu'ils arrivent (l'onglet Rondes lit la liste des comptes)
+        self._users._charge.connect(lambda *_: self._rondes.rafraichir_comptes())
         self._tabs.addTab(self._rondes, icon("route"), "Rondes")
         self._tabs.addTab(self._users, icon("users"), "Utilisateurs")
         # les comptes ont pu changer dans l'onglet Utilisateurs : réaligner
@@ -541,6 +591,11 @@ class AdminDialog(QDialog):
                 or self._rot.value() != self._cfg.rotation_duree_s)
 
     def reject(self):
+        # un enregistrement est en vol (thread) : ignorer toute fermeture (bouton
+        # Fermer, Échap, ou X du gestionnaire de fenêtres) jusqu'à sa fin — sinon
+        # un « Enregistrer » relancerait un second thread concurrent (double push)
+        if self._sauvegarde_en_cours:
+            return
         # ne jamais jeter des modifications sans prévenir
         if self.demande_mode is None and self._modifications_en_attente():
             r = QMessageBox.question(
@@ -565,38 +620,92 @@ class AdminDialog(QDialog):
         self.demande_mode = "serveur"
         self.reject()
 
+    _TITRES_ERREUR = {"config": "Serveur", "users": "Utilisateurs", "rondes": "Rondes"}
+    _TITRES_AVERT = {"config": "Configuration — avertissements",
+                     "users": "Utilisateurs — avertissements",
+                     "rondes": "Rondes — avertissements"}
+
     def _terminer(self):
+        if self._sauvegarde_en_cours:            # ré-entrance : un envoi tourne déjà
+            return
         cfg_a_pousser = self._manager.modifie or self._rot.value() != self._cfg.rotation_duree_s
         if self._rot.value() != self._cfg.rotation_duree_s:
             self._cfg.rotation_duree_s = self._rot.value()
 
-        from ..remote import ErreurServeur
+        # données figées sur le thread UI, envoi séquentiel en arrière-plan.
+        # Ordre : config, puis comptes AVANT rondes (une ronde attribuée à un
+        # compte créé dans la session doit le trouver déjà enregistré).
+        etapes = []
         if cfg_a_pousser:
-            try:
-                warnings = self._remote.pousser(self._cfg)
-            except ErreurServeur as e:
-                QMessageBox.critical(self, "Serveur", f"Configuration non enregistrée :\n{e}")
-                return
-            if warnings:
-                QMessageBox.warning(self, "Configuration — avertissements",
-                                    "\n".join(warnings[:20]))
-            self._manager.modifie = False
-            self.recharger = True
-            self.enregistre = True
-
-        # les comptes AVANT les rondes : une ronde attribuée à un compte créé
-        # dans cette session doit trouver le compte déjà enregistré
+            cfg = self._cfg
+            etapes.append(("config", (lambda: self._remote.pousser(cfg)), []))
         if self._users.modifie:
-            if not self._users.pousser():
-                return
-            self._users.modifie = False
-            self.recharger = True
-            self.enregistre = True
-
+            users = self._users.donnees()
+            etapes.append(("users", (lambda: self._remote.users_pousser(users)), []))
         if self._rondes.modifie:
-            if not self._rondes.pousser():
-                return
-            self._rondes.modifie = False
+            data = self._rondes.donnees()
+            vides = self._rondes.vides()
+            etapes.append(("rondes", (lambda: self._remote.rounds_pousser(data)), vides))
+        if not etapes:
+            self.accept()
+            return
+
+        self._sauvegarde_en_cours = True
+        self.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+
+        def work():
+            from ..remote import ErreurServeur
+            resultats = []
+            try:
+                for nom, fn, vides in etapes:
+                    try:
+                        warnings = list(fn() or [])
+                        warnings += [f"ronde '{n}' sans étape — non enregistrée" for n in vides]
+                        resultats.append((nom, True, warnings, ""))
+                    except ErreurServeur as e:
+                        resultats.append((nom, False, [], str(e) or "serveur injoignable"))
+                        break                    # arrêt à la première erreur
+                    except Exception as e:
+                        resultats.append((nom, False, [], str(e) or "erreur inattendue"))
+                        break
+            finally:
+                # toujours émettre : sinon le dialogue reste désactivé ET
+                # infermable (reject() est bloqué pendant la sauvegarde)
+                try:
+                    self._sauve_termine.emit(resultats)
+                except RuntimeError:
+                    pass
+        threading.Thread(target=work, daemon=True, name="admin-save").start()
+
+    def _on_sauve_termine(self, resultats):
+        QApplication.restoreOverrideCursor()
+        self.setEnabled(True)
+        self._sauvegarde_en_cours = False
+        if not resultats:
+            # thread mort avant tout traitement : ne JAMAIS fermer en « succès »
+            # (perte silencieuse) — laisser le panneau ouvert avec les modifs
+            QMessageBox.critical(self, "Serveur",
+                                 "Enregistrement impossible : erreur inattendue.")
+            return
+        echec = None
+        for nom, ok, warnings, err in resultats:
+            if not ok:
+                echec = (nom, err)
+                break
+            if nom == "config":
+                self._manager.modifie = False
+            elif nom == "users":
+                self._users.modifie = False
+            elif nom == "rondes":
+                self._rondes.modifie = False
             self.recharger = True
             self.enregistre = True
+            if warnings:
+                QMessageBox.warning(self, self._TITRES_AVERT[nom],
+                                    "\n".join(warnings[:20]))
+        if echec is not None:
+            QMessageBox.critical(self, self._TITRES_ERREUR[echec[0]],
+                                 f"Enregistrement impossible :\n{echec[1]}")
+            return                               # laisser le panneau ouvert
         self.accept()

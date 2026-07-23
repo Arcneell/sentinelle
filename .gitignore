@@ -45,9 +45,18 @@ _diag/
 # Configs outils IA locaux (chemins machine, jamais publiés)
 .mcp.json
 .claude/
+.clinerules/
 .codebuddy/
 .cursor/
 .gemini/
+.opencode/
 .qoder/
 .vscode/
+.windsurf/
 opencode.jsonc
+AGENTS.md
+.github/copilot-instructions.md
+
+# Diffs / patchs de travail locaux
+*.diff
+*.patch

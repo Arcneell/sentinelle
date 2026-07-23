@@ -12,6 +12,7 @@ nos rotations ré-ouvrent des flux en permanence.
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,11 @@ logger = logging.getLogger(__name__)
 
 PROBE_TIMEOUT = 8
 
-_AUTH_MARKERS = ("401", "unauthorized", "authentication", "auth failed")
+_AUTH_MARKERS = ("unauthorized", "authentication", "auth failed")
+# le code 401 en JETON isolé uniquement : un « 401 » noyé dans un autre nombre
+# (« 14012 », un horodatage…) ne doit pas déclencher l'ARRÊT DÉFINITIF des
+# tentatives, conséquence disproportionnée pour une correspondance fortuite.
+_AUTH_401 = re.compile(r"(?<!\d)401(?!\d)")
 _NETWORK_MARKERS = ("refused", "no route", "unreachable", "network is down",
                     "failed to resolve", "name or service not known", "host is down")
 _TIMEOUT_MARKERS = ("timed out", "timeout")
@@ -29,7 +34,7 @@ _TIMEOUT_MARKERS = ("timed out", "timeout")
 def classify_text(text: str) -> str:
     """Classe un texte d'erreur (stderr ffprobe ou logs mpv concaténés)."""
     s = (text or "").lower()
-    if any(m in s for m in _AUTH_MARKERS):
+    if any(m in s for m in _AUTH_MARKERS) or _AUTH_401.search(s):
         return "auth"
     # réseau avant timeout : « Connection to tcp://… failed: Connection refused »
     # contient les deux, mais c'est bien un refus, pas un délai dépassé

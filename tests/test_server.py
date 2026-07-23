@@ -74,27 +74,35 @@ def test_parcours_complet(tmp_path):
         assert c.get("/api/users", headers=V).status_code == 403
         assert c.get("/api/config/full", headers=V).status_code == 403
 
-        # autorisation relais : refus viewer, accord admin, refus jeton bidon
+        # autorisation relais : le mot de passe RTSP est le jeton de portée
+        # « relay » livré par /api/config, jamais le jeton de session.
         base = {"action": "read", "path": "cam1-sub"}
-        assert c.post("/api/relay-auth", json={**base, "password": tv}).status_code == 403
-        assert c.post("/api/relay-auth", json={**base, "password": tok}).status_code == 200
+        rt_admin = c.get("/api/config", headers=A).json()["relay"]["token"]
+        rt_viewer = c.get("/api/config", headers=V).json()["relay"]["token"]
+        assert c.post("/api/relay-auth", json={**base, "password": rt_viewer}).status_code == 403
+        assert c.post("/api/relay-auth", json={**base, "password": rt_admin}).status_code == 200
         assert c.post("/api/relay-auth", json={**base, "password": "bidon"}).status_code == 401
+        # cloisonnement des portées : un jeton de SESSION (api) refusé comme mot
+        # de passe RTSP — sa capture par écoute du flux ne rouvre pas l'API
+        assert c.post("/api/relay-auth", json={**base, "password": tok}).status_code == 401
 
-        # publication : refusée depuis une IP publique, tolérée depuis le réseau
-        # interne ET sans ip (appel interne MediaMTX — ne jamais couper les sources)
+        # publication : TOUJOURS refusée (aucune source ne publie vers le relais),
+        # y compris depuis le réseau interne — empêche l'injection de fausse caméra
         pub = {"action": "publish", "path": "cam1-sub"}
         assert c.post("/api/relay-auth", json={**pub, "ip": "8.8.8.8"}).status_code == 403
-        assert c.post("/api/relay-auth", json={**pub, "ip": "127.0.0.1"}).status_code == 200
-        assert c.post("/api/relay-auth", json=pub).status_code == 200
+        assert c.post("/api/relay-auth", json={**pub, "ip": "127.0.0.1"}).status_code == 403
+        assert c.post("/api/relay-auth", json=pub).status_code == 403
 
         # droit accordé au site -> le viewer voit la caméra
         v["sites"] = ["s1"]
         c.put("/api/users", headers=A, json={"users": users + [v]})
         tv = c.post("/api/login", json={"username": "v", "password": "viewer-1"}).json()["token"]
         V = {"Authorization": f"Bearer {tv}"}
-        assert [x["id"] for x in c.get("/api/config", headers=V).json()["cameras"]] == ["cam1"]
+        vue_v = c.get("/api/config", headers=V).json()
+        assert [x["id"] for x in vue_v["cameras"]] == ["cam1"]
+        rt_viewer = vue_v["relay"]["token"]
         assert c.post("/api/relay-auth",
-                      json={**base, "password": tv}).status_code == 200
+                      json={**base, "password": rt_viewer}).status_code == 200
 
         # boucles personnelles filtrées sur les caméras visibles
         boucles = {"sequences": [
@@ -105,11 +113,19 @@ def test_parcours_complet(tmp_path):
         seqs = c.get("/api/config", headers=V).json()["sequences"]
         assert [s["nom"] for s in seqs] == ["ok"]
 
-        # changement de mot de passe -> l'ancienne session est invalidée
+        # changement de mot de passe -> l'ancienne session est invalidée, et la
+        # réponse fournit un relay_token NEUF encore valide contre le relais
+        # (l'ancien jeton relay, signé avec l'ancien hash, est mort lui aussi)
         r = c.post("/api/account/password", headers=V,
                    json={"ancien": "viewer-1", "nouveau": "viewer-2"})
         assert r.status_code == 200
         assert c.get("/api/config", headers=V).status_code == 401
+        nouveau_relay = r.json()["relay_token"]
+        assert nouveau_relay != rt_viewer
+        assert c.post("/api/relay-auth",
+                      json={**base, "password": rt_viewer}).status_code == 401
+        assert c.post("/api/relay-auth",
+                      json={**base, "password": nouveau_relay}).status_code == 200
 
 
 def test_rondes_partagees(tmp_path):
@@ -205,6 +221,105 @@ def test_mot_de_passe_trop_court_rejete(tmp_path):
         # changement de son propre mot de passe : minimum imposé aussi
         assert c.post("/api/account/password", headers=A,
                       json={"ancien": mdp, "nouveau": "court"}).status_code == 422
+
+
+def test_cloisonnement_portees_et_jeton(tmp_path):
+    """Cloisonnement des portées de jeton et durcissement du transport du jeton :
+    - un jeton relay est refusé comme Bearer sur l'API (sens inverse du test relais) ;
+    - le login fournit un relay_token distinct du jeton de session ;
+    - un jeton en paramètre d'URL (?token=) n'est plus accepté ;
+    - un jeton mal formé (ancien format) est rejeté."""
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        rep = c.post("/api/login", json={"username": "admin", "password": mdp}).json()
+        tok, relay_tok = rep["token"], rep["relay_token"]
+        assert relay_tok and relay_tok != tok       # relay distinct de l'API
+
+        # un jeton relay présenté en Bearer sur l'API est refusé (portée api attendue)
+        assert c.get("/api/config",
+                     headers={"Authorization": f"Bearer {relay_tok}"}).status_code == 401
+        # le jeton API fonctionne bien, lui
+        assert c.get("/api/config", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
+
+        # jeton en paramètre d'URL : plus accepté (fuite via journaux/Referer)
+        assert c.get(f"/api/config?token={tok}").status_code == 401
+        # jeton mal formé (ancien format 3 parties / bruit) : rejeté proprement
+        assert c.get("/api/config",
+                     headers={"Authorization": "Bearer a.b.c"}).status_code == 401
+
+
+def test_snapshot_autorisation(tmp_path):
+    """_cam_autorisee : un viewer sans droit sur la caméra reçoit 404 sur le
+    snapshot (contrôle d'accès partagé PTZ/snapshot)."""
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        tok = c.post("/api/login", json={"username": "admin", "password": mdp}).json()["token"]
+        A = {"Authorization": f"Bearer {tok}"}
+        users = c.get("/api/users", headers=A).json()["users"]
+        v = {"username": "v", "role": "user", "tout": False,
+             "sites": [], "cameras": [], "password": "viewer-1"}
+        c.put("/api/users", headers=A, json={"users": users + [v]})
+        tv = c.post("/api/login", json={"username": "v", "password": "viewer-1"}).json()["token"]
+        V = {"Authorization": f"Bearer {tv}"}
+        # viewer sans droit → 404 (caméra inconnue ou non autorisée)
+        assert c.get("/api/snapshot/cam1", headers=V).status_code == 404
+        # caméra inexistante, même pour l'admin → 404
+        assert c.get("/api/snapshot/fantome", headers=A).status_code == 404
+
+
+def test_revocation_sessions(tmp_path):
+    """Révocation : /api/account/logout invalide sa propre session ; un admin
+    peut couper toutes les sessions d'un autre compte sans son mot de passe."""
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        tok = c.post("/api/login", json={"username": "admin", "password": mdp}).json()["token"]
+        A = {"Authorization": f"Bearer {tok}"}
+        users = c.get("/api/users", headers=A).json()["users"]
+        v = {"username": "v", "role": "user", "tout": True,
+             "sites": [], "cameras": [], "password": "viewer-1"}
+        c.put("/api/users", headers=A, json={"users": users + [v]})
+
+        # logout : le viewer coupe sa propre session
+        tv = c.post("/api/login", json={"username": "v", "password": "viewer-1"}).json()["token"]
+        V = {"Authorization": f"Bearer {tv}"}
+        assert c.get("/api/config", headers=V).status_code == 200
+        assert c.post("/api/account/logout", headers=V).status_code == 200
+        assert c.get("/api/config", headers=V).status_code == 401
+
+        # une édition admin du compte NE doit PAS invalider ses sessions actives
+        tv = c.post("/api/login", json={"username": "v", "password": "viewer-1"}).json()["token"]
+        V = {"Authorization": f"Bearer {tv}"}
+        c.put("/api/users", headers=A, json={"users": c.get("/api/users", headers=A).json()["users"]})
+        assert c.get("/api/config", headers=V).status_code == 200
+
+        # révocation admin : la session du viewer tombe immédiatement
+        assert c.post("/api/users/v/revoke", headers=A).status_code == 200
+        assert c.get("/api/config", headers=V).status_code == 401
+        # sans changer son mot de passe : il peut se reconnecter
+        assert c.post("/api/login",
+                      json={"username": "v", "password": "viewer-1"}).status_code == 200
+        # compte inconnu -> 404, réservé aux admins
+        assert c.post("/api/users/ghost/revoke", headers=A).status_code == 404
+
+
+def test_anti_force_brute_changement_mdp(tmp_path):
+    """Le changement de mot de passe est limité en tentatives : un jeton volé ne
+    peut pas deviner sans fin le mot de passe actuel."""
+    from sentinelle_server.app import LOGIN_MAX
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        tok = c.post("/api/login", json={"username": "admin", "password": mdp}).json()["token"]
+        A = {"Authorization": f"Bearer {tok}"}
+        for _ in range(LOGIN_MAX):
+            assert c.post("/api/account/password", headers=A,
+                          json={"ancien": "faux", "nouveau": "assez-long-1"}).status_code == 403
+        r = c.post("/api/account/password", headers=A,
+                   json={"ancien": "faux", "nouveau": "assez-long-1"})
+        assert r.status_code == 429 and "Retry-After" in r.headers
 
 
 def test_anti_force_brute_login(tmp_path):

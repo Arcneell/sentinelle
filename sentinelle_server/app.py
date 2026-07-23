@@ -25,7 +25,7 @@ from fastapi.responses import Response, StreamingResponse
 from sentinelle.snapshot import fetch_snapshot
 
 from . import __version__
-from .auth import MIN_MDP
+from .auth import MIN_MDP, SCOPE_RELAY
 from .motion import EventHub, MotionMonitor
 from .relay import Relay
 from .store import Store
@@ -71,6 +71,7 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     ptz_locks: dict[str, threading.Lock] = {}
     ptz_clients: dict[str, object] = {}
     login_fails: dict[str, list] = {}          # ip -> [horodatages d'échec récents]
+    mdp_fails: dict[str, list] = {}            # ip -> échecs récents de vérif. mdp actuel
 
     from contextlib import asynccontextmanager
 
@@ -90,6 +91,9 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     # ------------------------------------------------------------------- auth
 
     def _token(request: Request) -> str:
+        # jeton en en-tête uniquement (Bearer, ou Basic pour le champ mot de
+        # passe des snapshots) : jamais en paramètre d'URL, qui fuiterait dans
+        # les journaux de proxy, l'historique et l'en-tête Referer.
         auth = request.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             return auth[7:].strip()
@@ -99,7 +103,7 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                 return decode.split(":", 1)[1] if ":" in decode else ""
             except Exception:
                 return ""
-        return request.query_params.get("token", "")
+        return ""
 
     def user_courant(request: Request):
         u = store.users.user_du_jeton(_token(request))
@@ -145,7 +149,10 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             login_fails[ip] = recents
             raise HTTPException(401, "identifiant ou mot de passe incorrect")
         login_fails.pop(ip, None)              # succès → on repart de zéro pour cette IP
+        # jeton relay livré dès le login : le client peut ainsi rafraîchir le mot
+        # de passe RTSP en même temps que la session (sans re-télécharger /api/config)
         return {"token": store.users.emettre_jeton(user),
+                "relay_token": store.users.emettre_jeton(user, scope=SCOPE_RELAY),
                 "username": user.username, "role": user.role,
                 "version": __version__}
 
@@ -160,6 +167,17 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     @app.post("/api/account/password")
     async def changer_mon_mdp(request: Request):
         u = user_courant(request)
+        # anti-force-brute du mot de passe ACTUEL : ce point n'exige qu'un jeton
+        # (pas le mot de passe), donc un jeton volé pourrait sinon deviner le
+        # mot de passe réel sans limite. Limité par IP, comme le login.
+        ip = _ip_client(request)
+        now = time.time()
+        recents = [t for t in mdp_fails.get(ip, []) if now - t < LOGIN_WINDOW_S]
+        if len(recents) >= LOGIN_MAX:
+            mdp_fails[ip] = recents
+            retry = int(LOGIN_WINDOW_S - (now - recents[0]))
+            raise HTTPException(429, f"trop de tentatives — réessayez dans {retry}s",
+                                headers={"Retry-After": str(max(1, retry))})
         try:
             corps = await request.json()
         except Exception:
@@ -167,13 +185,31 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         ancien = str(corps.get("ancien", ""))
         nouveau = str(corps.get("nouveau", ""))
         if store.users.authentifier(u.username, ancien) is None:
+            recents.append(now)
+            mdp_fails[ip] = recents
+            if len(mdp_fails) > 512:
+                for k in [k for k, v in mdp_fails.items()
+                          if not v or now - v[-1] > LOGIN_WINDOW_S]:
+                    mdp_fails.pop(k, None)
             raise HTTPException(403, "mot de passe actuel incorrect")
+        mdp_fails.pop(ip, None)
         if len(nouveau) < MIN_MDP:
             raise HTTPException(422, f"nouveau mot de passe trop court (min {MIN_MDP})")
         store.users.definir_mot_de_passe(u.username, nouveau)
-        # le jeton signé dépend de l'empreinte du mdp → renouveler la session
+        # le jeton signé dépend de l'empreinte du mdp → renouveler la session ET
+        # le jeton relay (sinon le mot de passe RTSP déjà distribué devient
+        # invalide et toutes les tuiles vidéo tombent en 401 silencieusement)
         u2 = store.users.users[u.username]
-        return {"ok": True, "token": store.users.emettre_jeton(u2)}
+        return {"ok": True, "token": store.users.emettre_jeton(u2),
+                "relay_token": store.users.emettre_jeton(u2, scope=SCOPE_RELAY)}
+
+    @app.post("/api/account/logout")
+    def logout(request: Request):
+        """Révoque toutes les sessions du compte courant (déconnexion de tous
+        les appareils). Le jeton présenté devient immédiatement invalide."""
+        u = user_courant(request)
+        store.users.revoquer_sessions(u.username)
+        return {"ok": True}
 
     # ----------------------------------------------------------- configuration
 
@@ -245,7 +281,11 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             "version": __version__,
             "compte": {"username": u.username, "role": u.role},
             "rotation_duree_s": cfg.rotation_duree_s,
-            "relay": {"port": int(store.params["relay_port"])},
+            # jeton de portée « relay » : sert UNIQUEMENT de mot de passe RTSP.
+            # Distinct du jeton de session (Bearer) pour que sa capture par
+            # écoute du flux non chiffré ne donne aucun accès à l'API HTTP.
+            "relay": {"port": int(store.params["relay_port"]),
+                      "token": store.users.emettre_jeton(u, scope=SCOPE_RELAY)},
             "sites": [{"id": s.id, "nom": s.nom, "lien": s.lien}
                       for s in cfg.sites if s.id in sites_utiles],
             "cameras": [{
@@ -397,6 +437,16 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         logger.info(f"Utilisateurs mis à jour ({len(store.users.users)} comptes)")
         return {"ok": True, "warnings": warnings}
 
+    @app.post("/api/users/{username}/revoke")
+    async def users_revoquer(username: str, request: Request):
+        """Invalide immédiatement toutes les sessions d'un compte (poste volé,
+        jeton exfiltré) sans changer son mot de passe (administration)."""
+        exiger_admin(request)
+        if not store.users.revoquer_sessions(username):
+            raise HTTPException(404, "compte inconnu")
+        logger.info(f"Sessions révoquées pour '{username}'")
+        return {"ok": True}
+
     # ---------------------------------------------------------------- médias
 
     def _cam_autorisee(request: Request, cam_id: str):
@@ -429,17 +479,19 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         except Exception:
             raise HTTPException(400, "requête invalide")
         action = corps.get("action", "")
+        if action == "publish":
+            # Aucune publication légitime n'existe : les chemins du relais sont
+            # alimentés par une source RTSP tirée à la demande depuis les DVR
+            # (source + sourceOnDemand côté MediaMTX), jamais par un client qui publie. On
+            # refuse donc TOUTE publication — y compris depuis le LAN — pour
+            # empêcher qu'un équipement interne compromis injecte une fausse
+            # caméra dans le mur d'images des opérateurs.
+            raise HTTPException(403, "publication non autorisée")
         if action not in ("read", "playback"):
-            # publish : refusé depuis une IP publique (nos chemins sont alimentés
-            # par une source à la demande interne ; aucun poste ne publie vers le
-            # relais). Une requête SANS ip (appel interne MediaMTX) reste tolérée
-            # — sinon un changement de comportement de MediaMTX couperait tous
-            # les flux. Le reste (api/metrics) est déjà exclu côté MediaMTX.
-            ip = str(corps.get("ip", ""))
-            if action == "publish" and ip and not _ip_interne(ip):
-                raise HTTPException(403, "publication externe refusée")
+            # api/metrics : déjà exclu côté MediaMTX ; on tolère (appels internes).
             return {"ok": True}
-        user = store.users.user_du_jeton(str(corps.get("password", "")))
+        user = store.users.user_du_jeton(str(corps.get("password", "")),
+                                         scope=SCOPE_RELAY)
         if user is None:
             raise HTTPException(401, "jeton invalide")
         chemin = str(corps.get("path", ""))

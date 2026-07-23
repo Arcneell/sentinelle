@@ -7,6 +7,9 @@
 # Ports exposés aux clients :
 #   8080/tcp : API (configuration, snapshots, PTZ, événements)
 #   8554/tcp : flux vidéo (RTSP, lecture authentifiée)
+#
+# NB : l'API tourne sans privilège (UID/GID 10001). Le dossier hôte ./data doit
+# être accessible en écriture par cet UID :  mkdir -p data && sudo chown 10001:10001 data
 
 services:
   mediamtx:
@@ -22,6 +25,12 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.server
     restart: unless-stopped
+    # tourne sans privilège (UID/GID de l'image) ; défense en profondeur
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "8080:8080"
     environment:

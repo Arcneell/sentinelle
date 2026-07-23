@@ -29,8 +29,8 @@ def main() -> int:
     import uvicorn
 
     from .app import create_app
-    # access_log=False : les URLs peuvent porter un jeton en paramètre (mode
-    # photo) — on ne les écrit pas dans les journaux
+    # access_log=False : pas de journal d'accès par requête (bruit, et défense en
+    # profondeur — aucun jeton n'y transite, les jetons ne passent que par en-tête)
     uvicorn.run(create_app(), host=args.host, port=args.port,
                 log_level="info", access_log=False)
     return 0

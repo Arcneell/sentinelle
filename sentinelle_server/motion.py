@@ -119,18 +119,33 @@ class MotionMonitor:
     def _boucle(self, cam, ev: threading.Event):
         from sentinelle.onvif import OnvifCamera
         echecs = 0
+        signale = False
         while not ev.is_set():
             try:
                 oc = OnvifCamera(cam.hote, cam.user, cam.password, port=cam.port_http)
                 endpoint = oc.abonner_mouvement("PT1M")
+            except PermissionError as e:
+                # identifiants refusés : on n'insiste JAMAIS — des échecs d'auth
+                # répétés peuvent verrouiller le compte du DVR. Le thread s'arrête
+                # ; une nouvelle config (identifiants corrigés) le relancera.
+                logger.warning(f"[{cam.id}] événements ONVIF refusés ({e}) — abandon")
+                return
             except Exception as e:
                 echecs += 1
-                if echecs >= 3:
-                    logger.info(f"[{cam.id}] pas d'événements ONVIF ({e})")
-                    return
-                self._attendre(ev, min(2 ** echecs, 20))
+                # hors auth (DVR qui redémarre, site 4G coupé…) : NE JAMAIS
+                # abandonner définitivement — la détection doit reprendre seule
+                # dès que l'appareil répond. On journalise une fois (au 3e échec)
+                # puis on réessaie avec un backoff plafonné.
+                if echecs == 3 and not signale:
+                    logger.info(f"[{cam.id}] pas d'événements ONVIF ({e}) — "
+                                f"nouvelles tentatives en tâche de fond")
+                    signale = True
+                self._attendre(ev, min(2 ** min(echecs, 6), 60))
                 continue
+            if signale:
+                logger.info(f"[{cam.id}] événements ONVIF rétablis")
             echecs = 0
+            signale = False
             t_renouv = time.time() + 50
             while not ev.is_set():
                 try:
@@ -147,6 +162,7 @@ class MotionMonitor:
                             self._actifs.pop(cam.id, None)
                         self._on_change(cam.id, False)
                 if time.time() > t_renouv:
+                    oc.desabonner_mouvement(endpoint)   # libère avant de ré-abonner
                     break                       # renouvelle l'abonnement
 
     def _verifier_retombee(self):

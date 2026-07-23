@@ -133,6 +133,7 @@ class MotionMonitor(QObject):
                         with self._lock:
                             self._actifs.pop(cam.id, None)
                 if time.time() > t_renouv:
+                    oc.desabonner_mouvement(endpoint)   # libère avant de ré-abonner
                     break                       # renouvelle l'abonnement
 
     def _oublier(self, cam_id):

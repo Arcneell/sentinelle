@@ -46,6 +46,9 @@ class MainWindow(QMainWindow):
     # résultat du chargement de configuration serveur exécuté en arrière-plan :
     # (cfg | None, erreur "" | "jeton" | message, initial)
     _config_resultat = Signal(object, str, bool)
+    # résultat d'un appel serveur générique lancé par _executer_reseau :
+    # (résultat | None, erreur "" | message)
+    _reseau_resultat = Signal(object, str)
 
     def __init__(self, config_path: str):
         super().__init__()
@@ -64,6 +67,7 @@ class MainWindow(QMainWindow):
         self._motion_ids = set()                    # caméras actuellement en mouvement
         self._icon_widgets = []                     # (widget, nom_icone) à recolorer
         self._session_verif_en_cours = False        # un contrôle de session est en vol
+        self._login_differe = None                   # (user, mdp) à jouer HORS du thread UI
         from ..reglages import reglages
         self._settings = reglages()
         self._remote = self._creer_remote()         # None = mode autonome
@@ -92,22 +96,27 @@ class MainWindow(QMainWindow):
         from ..remote import ServeurDistant
         return ServeurDistant(url)
 
-    def _assurer_session(self) -> bool:
+    def _assurer_session(self, silencieux: bool = True) -> bool:
         """Garantit une session serveur ouverte. Tente les identifiants mémorisés,
-        sinon demande une connexion. Retourne True si connecté."""
+        sinon demande une connexion. Retourne True si connecté OU si une tentative
+        silencieuse est différée (elle sera jouée hors du thread UI).
+
+        silencieux=True : ne JAMAIS appeler login() sur le thread UI (gel jusqu'à
+        ~13 s sur réseau 4G lent au démarrage). Avec des identifiants mémorisés,
+        on diffère le login au thread de _load_config et on rend la main aussitôt.
+        silencieux=False : la tentative silencieuse a déjà échoué (jeton refusé) —
+        on passe directement à la connexion interactive."""
         if self._remote is None or self._remote.connecte:
             return True
         from ..config import desobfusquer, obfusquer
-        from ..remote import ErreurServeur
-        # tentative silencieuse avec les identifiants mémorisés
+        # tentative silencieuse avec les identifiants mémorisés : DIFFÉRÉE hors
+        # du thread UI (le login réseau bloquant est joué par _load_config)
         user = self._settings.value("serveur_user", "", type=str)
         mdp = desobfusquer(self._settings.value("serveur_pass", "", type=str))
-        if user and mdp:
-            try:
-                self._remote.login(user, mdp)
-                return True
-            except ErreurServeur:
-                pass
+        if silencieux and user and mdp:
+            self._login_differe = (user, mdp)
+            return True
+        self._login_differe = None
         # connexion interactive ; l'adresse est saisissable seulement si elle
         # n'est pas encore connue (premier paramétrage du poste)
         from PySide6.QtWidgets import QApplication
@@ -255,6 +264,18 @@ class MainWindow(QMainWindow):
         self._vider_grille()
 
         self.hide()                              # ferme l'interface principale
+        # révoquer la session côté serveur (déconnexion réelle de tous les
+        # appareils) — best-effort, dans un thread pour ne pas geler l'UI.
+        # join(3) borné AVANT d'ouvrir la page de connexion : la révocation
+        # (bump de version côté serveur) doit précéder un éventuel re-login
+        # immédiat sur le MÊME compte, sinon elle invaliderait le jeton tout
+        # neuf. Fenêtre cachée à cet instant : la courte attente est invisible.
+        ancien = self._remote
+        if ancien is not None and ancien.connecte:
+            th = threading.Thread(target=ancien.deconnecter, daemon=True,
+                                  name="logout")
+            th.start()
+            th.join(timeout=3)
         self._remote = self._creer_remote()      # accès non authentifié
         if self._assurer_session():              # rouvre la page de connexion
             self._maj_bouton_admin()
@@ -285,6 +306,54 @@ class MainWindow(QMainWindow):
         else:
             self._ouvrir_admin()
 
+    # ------------------------------------------------------ appels serveur async
+
+    def _executer_reseau(self, fn, on_ok, titre: str):
+        """Exécute un appel serveur bloquant HORS du thread UI, avec l'interface
+        désactivée (l'event loop continue de tourner : pas de gel « ne répond
+        pas »). Le résultat revient sur le thread Qt et déclenche on_ok, ou une
+        boîte d'erreur en cas d'échec. Un seul appel à la fois (les actions qui
+        l'utilisent sont déclenchées depuis des dialogues modaux)."""
+        from PySide6.QtCore import Qt as _Qt
+        self._reseau_on_ok = on_ok
+        self._reseau_titre = titre
+        self.setEnabled(False)
+        QApplication.setOverrideCursor(_Qt.WaitCursor)
+
+        def work():
+            from ..remote import ErreurServeur
+            res, err, ok = None, "", False
+            try:
+                res = fn()
+                ok = True
+            except ErreurServeur as e:
+                err = str(e) or "serveur injoignable"
+            except Exception as e:
+                logger.exception("Appel serveur : erreur inattendue")
+                err = str(e) or "erreur inattendue"
+            finally:
+                # émettre dans le finally : même une erreur inattendue (y compris
+                # hors Exception) réactive l'UI — sinon fenêtre désactivée +
+                # curseur d'attente bloqués définitivement
+                if not ok and not err:
+                    err = "erreur inattendue"
+                try:
+                    self._reseau_resultat.emit(res, err)
+                except RuntimeError:
+                    pass                         # fenêtre détruite entre-temps
+        threading.Thread(target=work, daemon=True, name="reseau").start()
+
+    def _on_reseau_resultat(self, res, err: str):
+        QApplication.restoreOverrideCursor()
+        self.setEnabled(True)
+        on_ok, titre = self._reseau_on_ok, self._reseau_titre
+        self._reseau_on_ok = None
+        if err:
+            QMessageBox.warning(self, titre, f"Serveur injoignable :\n{err}")
+            return
+        if on_ok is not None:
+            on_ok(res)
+
     def _editer_sequences(self):
         """Édition des boucles : locales (autonome) ou personnelles (serveur)."""
         self._seq_stop()
@@ -302,25 +371,24 @@ class MainWindow(QMainWindow):
             self._peupler_sequences()
             toast(self, "Rondes enregistrées")
             return
-        from ..remote import ErreurServeur
-        try:
-            self._remote.pousser_boucles(self._cfg.sequences)
+        # envoi serveur hors du thread UI (gelait l'interface sur réseau lent)
+        sequences = self._cfg.sequences
+
+        def ok(_res):
             self._peupler_sequences()
             toast(self, "Rondes enregistrées")
-        except ErreurServeur as e:
-            QMessageBox.warning(self, "Rondes",
-                                f"Enregistrement impossible :\n{e}")
-            self._load_config()
+        self._executer_reseau(
+            lambda: self._remote.pousser_boucles(sequences), ok, "Rondes")
 
     def _ouvrir_admin(self):
         if self._remote is None or not self._remote.admin:
             return
-        from ..remote import ErreurServeur
-        try:
-            cfg_admin = self._remote.config_admin()
-        except ErreurServeur as e:
-            QMessageBox.warning(self, "Administration", f"Serveur injoignable :\n{e}")
-            return
+        # récupération de la config d'admin hors du thread UI, puis ouverture
+        self._executer_reseau(
+            lambda: self._remote.config_admin(),
+            self._ouvrir_admin_dialog, "Administration")
+
+    def _ouvrir_admin_dialog(self, cfg_admin):
         from .admin_dialog import AdminDialog
         dlg = AdminDialog(cfg_admin, self._remote, self)
         dlg.exec()
@@ -636,6 +704,9 @@ class MainWindow(QMainWindow):
         self._session_timer.timeout.connect(self._verifier_session)
         self._session_resultat.connect(self._on_session_resultat)
         self._config_resultat.connect(self._on_config_resultat)
+        self._reseau_resultat.connect(self._on_reseau_resultat)
+        self._reseau_on_ok = None
+        self._reseau_titre = ""
 
     def _tbtn(self, nom_icone: str, texte: str, tooltip: str, slot,
               checkable: bool = False) -> QToolButton:
@@ -716,12 +787,18 @@ class MainWindow(QMainWindow):
         self._cfg_fetch_en_cours = True
         remote = self._remote
         self._cfg_remote = remote               # sur quel objet ce chargement porte
+        creds = self._login_differe             # login silencieux à jouer dans le thread
         self.statusBar().showMessage("Chargement de la configuration…")
 
         def work():
             from ..remote import ErreurServeur, JetonInvalide
             cfg, err = None, ""
             try:
+                # login silencieux différé : joué ICI (thread), jamais sur l'UI.
+                # Conservé sur network error (retenté au prochain essai) ; sur
+                # jeton refusé, _on_config_resultat bascule en interactif.
+                if creds and not remote.connecte:
+                    remote.login(*creds)
                 cfg = remote.config_vue()
             except JetonInvalide:
                 err = "jeton"
@@ -750,14 +827,16 @@ class MainWindow(QMainWindow):
             return
 
         if err == "jeton":
-            # session expirée (mot de passe changé, serveur redémarré…). Le
-            # verrou empêche une relance programmée (backoff, contrôle de
-            # session) de partir avec un jeton vide PENDANT la page de connexion
-            # — elle rouvrait une seconde page par-dessus la première.
+            # session expirée (mot de passe changé, serveur redémarré…) OU
+            # identifiants mémorisés refusés lors du login différé. Le verrou
+            # empêche une relance programmée (backoff, contrôle de session) de
+            # partir avec un jeton vide PENDANT la page de connexion — elle
+            # rouvrait une seconde page par-dessus la première.
             self._remote.jeton = ""
+            self._login_differe = None           # la tentative silencieuse a échoué
             self._session_ui_en_cours = True
             try:
-                ok = self._assurer_session()
+                ok = self._assurer_session(silencieux=False)
             finally:
                 self._session_ui_en_cours = False
             if ok:
@@ -775,17 +854,21 @@ class MainWindow(QMainWindow):
                 f"Serveur injoignable ({err}) — nouvel essai dans {delay}s")
             if not self._cfg.cameras:
                 self._selection_appliquee()      # placeholder « non connecté »
+            # préserver `initial` à travers la relance : sinon un accroc réseau au
+            # démarrage (site 4G) ferait perdre la « ronde au démarrage » du poste
+            self._cfg_initial_attente = initial
             QTimer.singleShot(delay * 1000, self._relancer_load_config)
             return
 
         self._cfg_retry = 0
+        self._login_differe = None               # session ouverte : plus rien à différer
         self._appliquer_config(cfg, initial)
 
     def _relancer_load_config(self):
         if (self._remote is not None and not self._cfg_fetch_en_cours
                 and not self._session_ui_en_cours
                 and self._remote is getattr(self, "_cfg_remote", None)):
-            self._load_config()
+            self._load_config(getattr(self, "_cfg_initial_attente", False))
 
     def _appliquer_config(self, cfg, initial: bool = False):
         self.statusBar().clearMessage()      # efface un éventuel message persistant
@@ -815,6 +898,10 @@ class MainWindow(QMainWindow):
             self._motion_assurer()
             self._motion.surveiller(list(self._cfg.cameras))
         self._maj_session_timer()
+        # le login différé (identifiants mémorisés) n'ouvre la session que
+        # maintenant, dans le thread : rejouer le calcul du bouton Administration
+        # qui, à l'ouverture, voyait encore remote.connecte == False
+        self._maj_bouton_admin()
 
         if cfg.warnings:
             QMessageBox.warning(
@@ -866,6 +953,11 @@ class MainWindow(QMainWindow):
         dlg.exec()
         if dlg.deconnexion:
             self._deconnecter()
+        elif self._remote is not None:
+            # un changement de mot de passe a renouvelé le jeton relay : réaligner
+            # les URLs RTSP sur le nouveau jeton (les lectures en cours survivent,
+            # les reconnexions utiliseront le jeton frais). Sans effet sinon.
+            self._remote.maj_jeton_urls(self._cfg)
         elif etait_en_seq:
             self._update_status()
 
@@ -1469,7 +1561,16 @@ class MainWindow(QMainWindow):
         if not etapes:
             self._seq_stop()
             return
-        self._seq_idx = (self._seq_idx + 1) % len(etapes)
+        # ignore les étapes sans caméra (donnée incohérente reçue du serveur :
+        # schéma plus ancien, édition manuelle, migration) plutôt que de planter
+        # sur un IndexError pendant la lecture de la ronde
+        for _ in range(len(etapes)):
+            self._seq_idx = (self._seq_idx + 1) % len(etapes)
+            if etapes[self._seq_idx].cameras:
+                break
+        else:
+            self._seq_stop()                     # aucune étape exploitable
+            return
         etape = etapes[self._seq_idx]
 
         if etape.mode == "mono":

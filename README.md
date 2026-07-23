@@ -72,7 +72,7 @@ The Configuration window opens on first run.
 
 > **Prefer a package?** Pre-built Linux `.deb` files are attached to every
 > [release](https://github.com/Arcneell/sentinelle/releases):
-> `sudo apt install ./sentinelle_2.1.4_amd64.deb` — this is the supported install
+> `sudo apt install ./sentinelle_<version>_amd64.deb` — this is the supported install
 > path: it pulls `libmpv2`, the Qt/xcb libraries, the VA-API drivers (hard
 > dependencies) and `ffmpeg` (recommended, better failure diagnostics).
 > Plain `dpkg -i` does not resolve dependencies; if you use it, follow up with

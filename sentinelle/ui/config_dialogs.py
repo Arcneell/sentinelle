@@ -17,12 +17,12 @@ import threading
 from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
-                               QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QMessageBox,
-                               QPushButton, QSpinBox, QTableWidget,
-                               QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog,
+                               QDialogButtonBox, QFormLayout, QGridLayout,
+                               QGroupBox, QHBoxLayout, QHeaderView, QLabel,
+                               QLineEdit, QMessageBox, QPushButton, QSpinBox,
+                               QTableWidget, QTableWidgetItem, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..config import (LIENS, MARQUE_LABELS, MARQUES, MARQUES_URL_LIBRE,
                       PROFIL_LABELS, PROFILS, AppConfig, Camera, Site,
@@ -1025,10 +1025,14 @@ class PreferencesDialog(QDialog):
     d'administration, réservé aux comptes admin. Les boucles se modifient depuis
     le bouton « Boucles » de la barre du haut."""
 
+    _mdp_termine = Signal(str)               # erreur "" | message — thread → UI
+
     def __init__(self, remote, parent=None, noms_rondes: list | None = None):
         super().__init__(parent)
         self._remote = remote
         self.deconnexion = False
+        self._mdp_en_cours = False
+        self._mdp_termine.connect(self._on_mdp_termine)
         self.setWindowTitle("Configuration")
         self.setWindowIcon(icon("settings"))
         self.setMinimumWidth(460)
@@ -1081,8 +1085,17 @@ class PreferencesDialog(QDialog):
         lay.addStretch(1)
         lay.addWidget(boutons)
 
+    def reject(self):
+        # ne pas fermer pendant un changement de mot de passe en vol : sinon
+        # _on_mdp_termine afficherait sa boîte sur un dialogue déjà fermé et les
+        # champs ne seraient jamais vidés
+        if self._mdp_en_cours:
+            return
+        super().reject()
+
     def _changer_mdp(self):
-        from ..remote import ErreurServeur
+        if self._mdp_en_cours:               # ré-entrance : un envoi tourne déjà
+            return
         ancien = self._mdp_ancien.text()
         nouveau = self._mdp_nouv.text()
         if len(nouveau) < 8:                 # même minimum que le serveur (MIN_MDP)
@@ -1092,15 +1105,44 @@ class PreferencesDialog(QDialog):
         if nouveau != self._mdp_conf.text():
             QMessageBox.warning(self, "Mot de passe", "La confirmation ne correspond pas.")
             return
-        try:
-            self._remote.changer_mot_de_passe(ancien, nouveau)
-        except ErreurServeur as e:
-            QMessageBox.warning(self, "Mot de passe", f"Échec : {e}")
+        # envoi hors du thread UI (gelait la fenêtre sur réseau lent)
+        self._mdp_en_cours = True
+        self.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        remote = self._remote
+
+        def work():
+            from ..remote import ErreurServeur
+            err, ok = "", False
+            try:
+                remote.changer_mot_de_passe(ancien, nouveau)
+                ok = True
+            except ErreurServeur as e:
+                err = str(e) or "serveur injoignable"
+            except Exception as e:
+                err = str(e) or "erreur inattendue"
+            finally:
+                if not ok and not err:           # erreur hors Exception
+                    err = "erreur inattendue"
+                try:
+                    self._mdp_termine.emit(err)  # dans finally : réactive toujours l'UI
+                except RuntimeError:
+                    pass
+        threading.Thread(target=work, daemon=True, name="mdp").start()
+
+    def _on_mdp_termine(self, err: str):
+        QApplication.restoreOverrideCursor()
+        self.setEnabled(True)
+        self._mdp_en_cours = False
+        if err:
+            QMessageBox.warning(self, "Mot de passe", f"Échec : {err}")
             return
         for champ in (self._mdp_ancien, self._mdp_nouv, self._mdp_conf):
             champ.clear()
         QMessageBox.information(self, "Mot de passe", "Mot de passe modifié.")
 
     def _se_deconnecter(self):
+        if self._mdp_en_cours:               # changement de mot de passe en vol
+            return
         self.deconnexion = True
         self.accept()

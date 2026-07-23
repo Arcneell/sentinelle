@@ -20,7 +20,7 @@ import yaml
 
 from sentinelle.config import load_config, save_config
 
-from .auth import Users
+from .auth import Users, _restreindre
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +44,10 @@ class Store:
             logger.warning("=" * 60)
             # trace persistante, lisible une fois puis à supprimer par l'admin
             try:
-                with open(os.path.join(self.data_dir, "admin-initial.txt"), "w",
-                          encoding="utf-8") as f:
+                chemin_admin = os.path.join(self.data_dir, "admin-initial.txt")
+                with open(chemin_admin, "w", encoding="utf-8") as f:
                     f.write(f"identifiant: admin\nmot de passe initial: {mdp}\n")
+                _restreindre(chemin_admin)
             except OSError:
                 pass
 
@@ -56,6 +57,7 @@ class Store:
         chemin = os.path.join(self.data_dir, "server.yaml")
         params = {}
         if os.path.exists(chemin):
+            _restreindre(chemin)               # durcit aussi les installs antérieures au correctif
             with open(chemin, encoding="utf-8") as f:
                 params = yaml.safe_load(f) or {}
         defauts = {
@@ -70,6 +72,7 @@ class Store:
                 f.write("# Sentinelle Server — secrets générés au premier démarrage.\n"
                         "# secret_key : signature des jetons de session (ne pas partager).\n")
                 yaml.safe_dump(params, f, sort_keys=False)
+            _restreindre(chemin)               # 0600 : secret de signature des jetons
             logger.info(f"Secrets serveur générés dans {chemin}")
         return params
 

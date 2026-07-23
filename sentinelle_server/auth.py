@@ -32,6 +32,23 @@ _ITERATIONS = 200_000
 # Longueur minimale imposée à tout nouveau mot de passe (login + admin).
 MIN_MDP = 8
 
+# Portées de jeton : un jeton « api » ouvre l'API HTTP (visualisation +
+# administration selon le rôle) ; un jeton « relay » ne sert QUE de mot de passe
+# RTSP au relais vidéo. Le flux RTSP n'étant pas chiffré, son mot de passe peut
+# être capté par écoute réseau : le cloisonner en portée « relay » empêche qu'un
+# jeton ainsi sniffé serve contre l'API HTTP.
+SCOPE_API = "api"
+SCOPE_RELAY = "relay"
+
+
+def _restreindre(chemin: str):
+    """Restreint un fichier de secrets au propriétaire (0600). Sans effet sur
+    Windows (dev) ; protège les fichiers montés en volume sur l'hôte Linux."""
+    try:
+        os.chmod(chemin, 0o600)
+    except OSError:
+        pass
+
 
 def _ttl_s() -> int:
     """Durée de vie d'un jeton, en secondes (défaut : 7 jours)."""
@@ -69,7 +86,7 @@ class User:
     def __init__(self, username: str, role: str = "user", sel: str = "",
                  hash: str = "", tout: bool = False,
                  sites: list | None = None, cameras: list | None = None,
-                 sequences: list | None = None):
+                 sequences: list | None = None, jetons_version: int = 0):
         self.username = username
         self.role = role if role in ("admin", "user") else "user"
         self.sel = sel
@@ -78,6 +95,11 @@ class User:
         self.sites = list(sites or [])
         self.cameras = list(cameras or [])
         self.sequences = list(sequences or [])   # boucles personnelles (dicts)
+        # incrémenté pour révoquer d'un coup TOUTES les sessions du compte
+        # (poste volé, jeton exfiltré) sans changer le mot de passe : le numéro
+        # entre dans la signature du jeton, donc les anciens jetons deviennent
+        # invalides dès qu'il change.
+        self.jetons_version = int(jetons_version)
 
     @property
     def admin(self) -> bool:
@@ -92,7 +114,7 @@ class User:
         return {"username": self.username, "role": self.role,
                 "sel": self.sel, "hash": self.hash, "tout": self.tout,
                 "sites": self.sites, "cameras": self.cameras,
-                "sequences": self.sequences}
+                "sequences": self.sequences, "jetons_version": self.jetons_version}
 
     def to_public(self) -> dict:
         """Sans secret (sel/hash) — pour l'API d'administration."""
@@ -122,7 +144,8 @@ class Users:
                         tout=bool(u.get("tout", False)),
                         sites=list(u.get("sites") or []),
                         cameras=list(u.get("cameras") or []),
-                        sequences=list(u.get("sequences") or []))
+                        sequences=list(u.get("sequences") or []),
+                        jetons_version=int(u.get("jetons_version", 0) or 0))
                 except (KeyError, TypeError):
                     continue
 
@@ -133,6 +156,7 @@ class Users:
                     "# Mots de passe hachés (PBKDF2) ; ne pas éditer à la main.\n")
             yaml.safe_dump({"users": [u.to_stored() for u in self.users.values()]},
                            f, allow_unicode=True, sort_keys=False)
+        _restreindre(tmp)                       # 0600 avant publication du fichier
         os.replace(tmp, self.path)
 
     def vide(self) -> bool:
@@ -151,22 +175,27 @@ class Users:
 
     # ------------------------------------------------------------------- jetons
     #
-    # Format : b64(username).exp.signature  où exp est un horodatage Unix et la
-    # signature couvre username + empreinte du mot de passe + exp. Changer le
-    # mot de passe (hash) OU dépasser exp rend le jeton invalide.
+    # Format : b64(username).scope.exp.signature  où exp est un horodatage Unix
+    # et la signature couvre username + empreinte du mot de passe + version de
+    # session + portée + exp. Rend le jeton invalide : changer le mot de passe
+    # (hash), incrémenter jetons_version (révocation), dépasser exp, ou présenter
+    # le jeton dans une portée qui n'est pas la sienne.
 
-    def _signature(self, user: User, exp: int) -> str:
-        msg = f"{user.username}:{user.hash}:{exp}".encode()
+    def _signature(self, user: User, scope: str, exp: int) -> str:
+        msg = f"{user.username}:{user.hash}:{user.jetons_version}:{scope}:{exp}".encode()
         return _b64(hmac.new(self.secret, msg, hashlib.sha256).digest())
 
-    def emettre_jeton(self, user: User) -> str:
+    def emettre_jeton(self, user: User, scope: str = SCOPE_API) -> str:
         exp = int(time.time()) + _ttl_s()
-        return f"{_b64(user.username.encode())}.{exp}.{self._signature(user, exp)}"
+        return (f"{_b64(user.username.encode())}.{scope}.{exp}."
+                f"{self._signature(user, scope, exp)}")
 
-    def user_du_jeton(self, jeton: str) -> User | None:
-        if not jeton or jeton.count(".") != 2:
+    def user_du_jeton(self, jeton: str, scope: str = SCOPE_API) -> User | None:
+        if not jeton or jeton.count(".") != 3:
             return None
-        nom_b64, exp_s, sig = jeton.split(".", 2)
+        nom_b64, scope_j, exp_s, sig = jeton.split(".", 3)
+        if scope_j != scope:
+            return None                         # jeton présenté hors de sa portée
         try:
             username = _unb64(nom_b64).decode("utf-8")
             exp = int(exp_s)
@@ -177,7 +206,7 @@ class Users:
         user = self.users.get(username)
         if user is None:
             return None
-        if not hmac.compare_digest(sig, self._signature(user, exp)):
+        if not hmac.compare_digest(sig, self._signature(user, scope, exp)):
             return None
         return user
 
@@ -185,10 +214,22 @@ class Users:
         """Secondes restant avant expiration (0 si absent/illisible). Ne
         revérifie pas la signature : à n'appeler qu'après user_du_jeton."""
         try:
-            exp = int(jeton.split(".", 2)[1])
+            exp = int(jeton.split(".", 3)[2])
         except (IndexError, ValueError):
             return 0
         return max(0, exp - int(time.time()))
+
+    def revoquer_sessions(self, username: str) -> bool:
+        """Invalide immédiatement toutes les sessions (api + relay) du compte en
+        incrémentant sa version de jeton. Utilisé pour couper un poste volé sans
+        toucher au mot de passe."""
+        with self.lock:
+            user = self.users.get(username)
+            if user is None:
+                return False
+            user.jetons_version += 1
+            self._sauver()
+            return True
 
     # ------------------------------------------------------------------- login
 
@@ -256,7 +297,10 @@ class Users:
                 cameras=[str(x) for x in (e.get("cameras") or [])],
                 # les boucles personnelles ne transitent pas par l'admin :
                 # celles du compte existant sont conservées
-                sequences=(ancien.sequences if ancien is not None else []))
+                sequences=(ancien.sequences if ancien is not None else []),
+                # préserver la version de session : sinon éditer un compte
+                # déconnecterait toutes ses sessions actives à chaque fois
+                jetons_version=(ancien.jetons_version if ancien is not None else 0))
         if not any(u.admin for u in nouveaux.values()):
             raise ValueError("il doit rester au moins un administrateur")
         with self.lock:
