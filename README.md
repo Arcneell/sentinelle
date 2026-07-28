@@ -158,6 +158,10 @@ docker compose up -d --build     # builds the API image and starts both containe
 - **Ports**: `8080/tcp` (API — login, config, snapshots, PTZ, motion over SSE, relay
   auth) and `8554/tcp` (RTSP relay). The MediaMTX control port stays inside the Docker
   network.
+- **Data directory ownership**: the API runs unprivileged (UID/GID 10001), so `deploy/data/`
+  *and everything in it* must be writable by that UID — `sudo chown -R 10001:10001 data`. A
+  file dropped there by root (manual bootstrap, older install) stays read-only to the server;
+  it starts anyway and says so in the log, but cannot save settings.
 - **Update**: `git pull && docker compose up -d --build`. After editing
   `deploy/mediamtx.yml`, recreate the relay so it reloads: `docker compose up -d
   --force-recreate mediamtx`.

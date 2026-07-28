@@ -79,15 +79,36 @@ class Store:
         for k in absents:
             params[k] = optionnels[k]
         if manquants or absents:
-            with open(chemin, "w", encoding="utf-8") as f:
-                f.write("# Sentinelle Server — secrets générés au premier démarrage.\n"
-                        "# secret_key : signature des jetons de session (ne pas partager).\n"
-                        "# relay_host : hôte du relais annoncé aux clients "
-                        "(vide = hôte de l'API).\n")
-                yaml.safe_dump(params, f, sort_keys=False)
-            _restreindre(chemin)               # 0600 : secret de signature des jetons
-            logger.info(f"Paramètres serveur écrits dans {chemin} "
-                        f"({', '.join(manquants + absents)})")
+            try:
+                with open(chemin, "w", encoding="utf-8") as f:
+                    f.write("# Sentinelle Server — secrets générés au premier démarrage.\n"
+                            "# secret_key : signature des jetons de session (ne pas partager).\n"
+                            "# relay_host : hôte du relais annoncé aux clients "
+                            "(vide = hôte de l'API).\n")
+                    yaml.safe_dump(params, f, sort_keys=False)
+                _restreindre(chemin)           # 0600 : secret de signature des jetons
+                logger.info(f"Paramètres serveur écrits dans {chemin} "
+                            f"({', '.join(manquants + absents)})")
+            except OSError as e:
+                if manquants:
+                    # secret_key ou relay_port à générer : ne pas pouvoir les
+                    # persister est bloquant, sinon la clé de signature change à
+                    # chaque redémarrage et tout le parc se déconnecte sans
+                    # explication. Message explicite plutôt qu'une trace.
+                    raise RuntimeError(
+                        f"impossible d'écrire {chemin} ({e}). Le dossier de "
+                        f"données doit être accessible en écriture par "
+                        f"l'utilisateur du serveur (UID/GID 10001 dans l'image "
+                        f"Docker) :  sudo chown -R 10001:10001 <dossier>") from None
+                # seules des clés facultatives manquaient (mise à jour d'une
+                # installation existante) : leur valeur par défaut tient en
+                # mémoire, le serveur démarre normalement. Une écriture ratée
+                # ici ne doit JAMAIS empêcher le démarrage.
+                logger.warning(
+                    f"{chemin} non modifiable ({e}) — valeurs par défaut "
+                    f"appliquées en mémoire pour : {', '.join(absents)}. "
+                    f"Pour les rendre configurables : "
+                    f"sudo chown -R 10001:10001 <dossier de données>")
         return params
 
     # ----------------------------------------------------------- configuration
