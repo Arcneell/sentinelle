@@ -16,8 +16,14 @@ import base64
 import ipaddress
 import json
 import logging
+import os
+import platform
+import shutil
+import signal
+import sys
 import threading
 import time
+from collections import deque
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
@@ -39,6 +45,43 @@ logger = logging.getLogger(__name__)
 # distance le compte d'un mur d'images (déni de service).
 LOGIN_WINDOW_S = 300
 LOGIN_MAX = 8
+
+# Journal consultable depuis le client : les dernières lignes sont gardées en
+# mémoire par un handler installé sur le logger racine. Suffisant pour
+# diagnostiquer un démarrage ou une caméra qui refuse, sans ouvrir de session
+# SSH sur le serveur.
+JOURNAL_MAX = 400
+
+
+class _JournalMemoire(logging.Handler):
+    """Garde les dernières lignes de journal dans un anneau borné."""
+
+    def __init__(self, taille: int = JOURNAL_MAX):
+        super().__init__()
+        self.lignes: deque = deque(maxlen=taille)
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            self.lignes.append({
+                "t": record.created,
+                "niveau": record.levelname,
+                "source": record.name,
+                "texte": record.getMessage(),
+            })
+        except Exception:
+            pass                    # un journal ne doit jamais casser le service
+
+
+def _installer_journal() -> _JournalMemoire:
+    """Installe (une seule fois) le handler mémoire sur le logger racine."""
+    racine = logging.getLogger()
+    for h in racine.handlers:
+        if isinstance(h, _JournalMemoire):
+            return h
+    h = _JournalMemoire()
+    h.setLevel(logging.INFO)
+    racine.addHandler(h)
+    return h
 
 
 def _ip_interne(ip: str) -> bool:
@@ -73,6 +116,8 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     ptz_clients: dict[str, object] = {}
     login_fails: dict[str, list] = {}          # ip -> [horodatages d'échec récents]
     mdp_fails: dict[str, list] = {}            # ip -> échecs récents de vérif. mdp actuel
+    journal = _installer_journal()
+    demarre_le = time.time()
 
     from contextlib import asynccontextmanager
 
@@ -676,5 +721,88 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         except Exception as e:
             return {"pret": relay.pret, "erreur": str(e)}
         return {"pret": relay.pret, "erreur": relay.derniere_erreur, "paths": etat}
+
+    # ------------------------------------------------------ conduite du service
+    #
+    # Ces quatre points permettent d'administrer le serveur depuis le client,
+    # sans session SSH. Tous réservés aux administrateurs.
+    #
+    # Le redémarrage s'obtient en ARRÊTANT proprement le processus : le
+    # conteneur est déclaré « restart: unless-stopped », c'est donc Docker qui
+    # le relance. Le serveur ne parle jamais au démon Docker — lui donner accès
+    # à /var/run/docker.sock équivaudrait à lui donner la machine entière, et
+    # ruinerait le durcissement du conteneur (user 10001, cap_drop).
+
+    @app.get("/api/server/status")
+    def server_status(request: Request):
+        exiger_admin(request)
+        with store.lock:
+            cams = list(store.cfg.cameras)
+            sites = list(store.cfg.sites)
+            rondes = list(store.cfg.sequences)
+            comptes = list(store.users.users.values())
+        roles = {"admin": 0, "user": 0, "service": 0}
+        for u in comptes:
+            roles["admin" if u.admin else ("service" if u.service else "user")] += 1
+        try:
+            total, _utilise, libre = shutil.disk_usage(store.data_dir)
+        except OSError:
+            total = libre = 0
+        return {
+            "version": __version__,
+            "demarre_le": demarre_le,
+            "uptime_s": max(0, int(time.time() - demarre_le)),
+            "python": platform.python_version(),
+            "systeme": f"{platform.system()} {platform.release()}",
+            "conteneur": os.path.exists("/.dockerenv"),
+            "data_dir": store.data_dir,
+            "disque_total": total,
+            "disque_libre": libre,
+            "cameras": len(cams),
+            "cameras_4g": sum(1 for c in cams if c.site and c.site.lien == "4g"),
+            "sites": len(sites),
+            "rondes": len(rondes),
+            "comptes": roles,
+            "mouvement_actif": len(hub.actifs_courants()),
+            "relais_pret": relay.pret,
+            "relais_erreur": relay.derniere_erreur,
+        }
+
+    @app.get("/api/server/logs")
+    def server_logs(request: Request, lignes: int = 200):
+        exiger_admin(request)
+        n = max(1, min(int(lignes), JOURNAL_MAX))
+        return {"lignes": list(journal.lignes)[-n:]}
+
+    @app.post("/api/server/reload")
+    def server_reload(request: Request):
+        u = exiger_admin(request)
+        warnings = store.recharger()
+        relay.sync_fond(store)
+        monitor.surveiller(store.cfg.cameras)
+        logger.info(f"Configuration rechargée depuis le disque par {u.username} "
+                    f"({len(store.cfg.cameras)} caméra(s))")
+        return {"ok": True, "warnings": warnings,
+                "cameras": len(store.cfg.cameras)}
+
+    @app.post("/api/server/restart")
+    def server_restart(request: Request):
+        u = exiger_admin(request)
+        logger.warning(f"Redémarrage du service demandé par {u.username}")
+
+        def arreter():
+            # laisse la réponse HTTP partir avant de couper
+            time.sleep(0.4)
+            monitor.stop()
+            # SIGTERM : uvicorn ferme proprement ses connexions, le processus
+            # sort, puis la politique de redémarrage du conteneur le relance.
+            # Sous Windows (poste de développement) SIGTERM n'existe pas :
+            # on sort directement.
+            if sys.platform == "win32":
+                os._exit(0)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Thread(target=arreter, daemon=True, name="restart").start()
+        return {"ok": True, "conteneur": os.path.exists("/.dockerenv")}
 
     return app

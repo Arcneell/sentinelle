@@ -56,6 +56,7 @@ class SiteDialog(QDialog):
     def __init__(self, parent=None, site: Site | None = None):
         super().__init__(parent)
         self.setWindowTitle("Site" if site else "Nouveau site")
+        self.setMinimumWidth(460)
         self._nom = QLineEdit(site.nom if site else "")
         self._nom.setPlaceholderText("ex. Le Port")
         self._lien = QComboBox()
@@ -74,6 +75,8 @@ class SiteDialog(QDialog):
         boutons.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 14)
+        lay.setSpacing(12)
         lay.addLayout(form)
         lay.addWidget(boutons)
 
@@ -103,7 +106,7 @@ class CameraDialog(QDialog):
         self._onvif_profile = camera.onvif_profile if camera else ""
         self._onvif_ptz = camera.ptz if camera else False
         self.setWindowTitle("Caméra" if camera else "Nouvelle caméra")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(640)
 
         self._nom = QLineEdit(camera.nom if camera else "")
         self._nom.setPlaceholderText("ex. Parking entrée")
@@ -190,8 +193,10 @@ class CameraDialog(QDialog):
         self._btn_test = QPushButton("Tester la connexion")
         self._btn_test.clicked.connect(self._tester_connexion)
         ligne_actions = QHBoxLayout()
+        ligne_actions.setSpacing(8)
         ligne_actions.addWidget(self._btn_onvif)
         ligne_actions.addWidget(self._btn_test)
+        ligne_actions.addStretch(1)          # largeur naturelle, pas étirés
         self._statut = QLabel("")
         self._statut.setWordWrap(True)
         self._statut.setObjectName("hint")
@@ -203,6 +208,8 @@ class CameraDialog(QDialog):
         boutons.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 14)
+        lay.setSpacing(12)
         lay.addLayout(form)
         lay.addWidget(self._grp_dvr)
         lay.addWidget(self._grp_custom)
@@ -372,7 +379,7 @@ class DvrDialog(QDialog):
         self._cfg = cfg
         self.cameras_creees: list[Camera] = []
         self.setWindowTitle("Ajouter un DVR")
-        self.setMinimumSize(560, 560)
+        self.setMinimumSize(820, 660)
 
         self._site = QComboBox()
         for s in cfg.sites:
@@ -435,17 +442,22 @@ class DvrDialog(QDialog):
         self._table.setColumnWidth(1, 60)
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        boutons.button(QDialogButtonBox.Ok).setText("Ajouter les caméras cochées")
+        boutons.button(QDialogButtonBox.Ok).setText("Ajouter la sélection")
         boutons.button(QDialogButtonBox.Cancel).setText("Annuler")
         boutons.accepted.connect(self._valider)
         boutons.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 14)
+        lay.setSpacing(12)
         lay.addLayout(form)
         lay.addLayout(ligne_scan)
         lay.addWidget(self._statut)
         lay.addWidget(self._table, 1)
         lay.addWidget(boutons)
+
+        from .widgets import MemoireGeometrie
+        MemoireGeometrie(self, "dvr", fraction=0.72, maxi=(1100, 860))
 
         self._canaux_prets.connect(self._afficher_canaux)
         self._marque.currentIndexChanged.connect(
@@ -553,7 +565,7 @@ class OnvifScanDialog(QDialog):
         self._annule = False            # évite d'injecter des caméras après annulation
         self._resolution = False        # évite le double-import
         self.setWindowTitle("Scan réseau ONVIF")
-        self.setMinimumSize(560, 520)
+        self.setMinimumSize(820, 620)
 
         self._site = QComboBox()
         for s in cfg.sites:
@@ -583,17 +595,22 @@ class OnvifScanDialog(QDialog):
         self._table.setColumnWidth(0, 30)
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        boutons.button(QDialogButtonBox.Ok).setText("Ajouter les caméras cochées")
+        boutons.button(QDialogButtonBox.Ok).setText("Ajouter la sélection")
         boutons.button(QDialogButtonBox.Cancel).setText("Annuler")
         boutons.accepted.connect(self._valider)
         boutons.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 14)
+        lay.setSpacing(12)
         lay.addLayout(form)
         lay.addWidget(self._btn_scan)
         lay.addWidget(self._statut)
         lay.addWidget(self._table, 1)
         lay.addWidget(boutons)
+
+        from .widgets import MemoireGeometrie
+        MemoireGeometrie(self, "onvif", fraction=0.72, maxi=(1100, 820))
 
         self._boutons = boutons
         self._devices_prets.connect(self._afficher_devices)
@@ -740,12 +757,6 @@ class CameraManagerWidget(QWidget):
         btn_onvif = QPushButton(icon("search"), " Recherche ONVIF")
         btn_onvif.setToolTip("Détecter les caméras ONVIF présentes sur le réseau")
         btn_onvif.clicked.connect(self._scan_onvif)
-        barre = QHBoxLayout()
-        barre.setSpacing(6)
-        for b in (btn_dvr, btn_cam, btn_site, btn_onvif):
-            barre.addWidget(b)
-        barre.addStretch(1)
-
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Sites et caméras", "Détails"])
         self._tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -756,17 +767,24 @@ class CameraManagerWidget(QWidget):
         self._btn_edit.clicked.connect(self._modifier)
         self._btn_del = QPushButton(icon("trash"), " Supprimer")
         self._btn_del.clicked.connect(self._supprimer)
-        edition = QHBoxLayout()
-        edition.addStretch(1)
-        edition.addWidget(self._btn_edit)
-        edition.addWidget(self._btn_del)
+
+        # ajouter à gauche, agir sur la sélection à droite, dans LA MÊME rangée
+        # au-dessus de la liste. En bas, Modifier/Supprimer se retrouvaient
+        # accolés à Enregistrer/Fermer, sans qu'on voie lesquels agissent sur la
+        # ligne sélectionnée et lesquels sur le dialogue entier.
+        barre = QHBoxLayout()
+        barre.setSpacing(6)
+        for b in (btn_dvr, btn_cam, btn_site, btn_onvif):
+            barre.addWidget(b)
+        barre.addStretch(1)
+        barre.addWidget(self._btn_edit)
+        barre.addWidget(self._btn_del)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
+        lay.setSpacing(12)
         lay.addLayout(barre)
         lay.addWidget(self._tree, 1)
-        lay.addLayout(edition)
 
         self._maj_boutons()
         self.rafraichir()
@@ -935,7 +953,7 @@ class ConfigDialog(QDialog):
         self.demande_serveur = False          # l'utilisateur veut passer en serveur
         self.setWindowTitle("Configuration")
         self.setWindowIcon(icon("settings"))
-        self.setMinimumSize(720, 600)
+        self.setMinimumSize(720, 560)
 
         self._manager = CameraManagerWidget(cfg, self)
 
@@ -949,13 +967,14 @@ class ConfigDialog(QDialog):
         rg.setContentsMargins(12, 8, 12, 8)
         rg.setHorizontalSpacing(18)
         rg.setLabelAlignment(Qt.AlignLeft)
-        rg.addRow("Durée de rotation :", self._rot)
+        rg.addRow("Défilement toutes les :", self._rot)
 
         # ronde lancée automatiquement à l'ouverture (réglage de CE poste) :
         # un mur d'images redémarré reprend sa ronde sans intervention
         from ..reglages import reglages as _reglages
         self._settings = _reglages()
         self._ronde_auto = QComboBox()
+        self._ronde_auto.setMaximumWidth(320)   # un nom de ronde, pas un roman
         self._ronde_auto.addItem("(aucune)", "")
         for s in cfg.sequences:
             self._ronde_auto.addItem(s.nom, s.nom)
@@ -965,12 +984,13 @@ class ConfigDialog(QDialog):
 
         # mode de fonctionnement (verrouillé : bascule réservée à un admin)
         mode = QGroupBox("Mode de fonctionnement")
-        ml = QVBoxLayout(mode)
+        ml = QHBoxLayout(mode)               # largeur naturelle, pas étiré
         ml.setContentsMargins(12, 8, 12, 8)
         btn_srv = QPushButton(icon("lock"), " Passer en mode serveur…")
         btn_srv.setToolTip("Nécessite un compte administrateur du serveur")
         btn_srv.clicked.connect(self._demander_serveur)
         ml.addWidget(btn_srv)
+        ml.addStretch(1)
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         boutons.button(QDialogButtonBox.Ok).setText("Enregistrer")
@@ -979,11 +999,17 @@ class ConfigDialog(QDialog):
         boutons.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
-        lay.setSpacing(10)
+        lay.setContentsMargins(16, 16, 16, 14)   # même respiration que les onglets
+        lay.setSpacing(14)
         lay.addWidget(self._manager, 1)
         lay.addWidget(reglages)
         lay.addWidget(mode)
         lay.addWidget(boutons)
+
+        # même panneau que l'administration, même besoin : voir le parc d'un
+        # coup d'œil sans redimensionner à chaque ouverture
+        from .widgets import MemoireGeometrie
+        MemoireGeometrie(self, "configuration", maxi=(1200, 900))
 
     def _demander_serveur(self):
         # la bascule elle-même (login admin) est gérée par la fenêtre principale
@@ -1035,7 +1061,7 @@ class PreferencesDialog(QDialog):
         self._mdp_termine.connect(self._on_mdp_termine)
         self.setWindowTitle("Configuration")
         self.setWindowIcon(icon("settings"))
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(560)
 
         # réglage de CE poste : ronde lancée automatiquement à l'ouverture
         from ..reglages import reglages as _reglages
@@ -1045,6 +1071,7 @@ class PreferencesDialog(QDialog):
         pf.setContentsMargins(12, 8, 12, 8)
         pf.setHorizontalSpacing(18)
         self._ronde_auto = QComboBox()
+        self._ronde_auto.setMaximumWidth(320)   # un nom de ronde, pas un roman
         self._ronde_auto.addItem("(aucune)", "")
         for nom in (noms_rondes or []):
             self._ronde_auto.addItem(nom, nom)

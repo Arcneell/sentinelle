@@ -185,6 +185,25 @@ class Users:
         _restreindre(tmp)                       # 0600 avant publication du fichier
         os.replace(tmp, self.path)
 
+    def recharger(self) -> None:
+        """Relit users.yaml en REMPLAÇANT les comptes en mémoire.
+
+        `_charger` ne fait que fusionner (il sert au démarrage sur un
+        dictionnaire vide) : un compte supprimé du fichier resterait valide.
+        On repart donc d'un dictionnaire neuf, et on ne le publie qu'une fois
+        la lecture réussie — un fichier illisible ne doit pas faire perdre
+        tous les comptes au serveur en fonctionnement."""
+        with self.lock:
+            anciens = self.users
+            self.users = {}
+            try:
+                self._charger()
+            except Exception:
+                self.users = anciens
+                raise
+            if not self.users:                  # fichier vide ou illisible
+                self.users = anciens
+
     def vide(self) -> bool:
         return not self.users
 

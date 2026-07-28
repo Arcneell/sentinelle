@@ -19,13 +19,14 @@ from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths, Qt, QTimer, Signal
+from PySide6.QtCore import QSize, QStandardPaths, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
                                QSizePolicy, QStackedLayout, QVBoxLayout, QWidget)
 
 from ..config import Camera, mask_url
 from ..player import MPV_IMPORT_ERROR, create_player, mpv_disponible
 from ..probe import classify_text, ffprobe_available, probe_rtsp
+from .icons import icon
 
 logger = logging.getLogger(__name__)
 
@@ -129,14 +130,20 @@ class TileState(Enum):
     NO_PLAYER = auto()      # libmpv absent
 
 
-_DOT_COLORS = {
-    TileState.IDLE: "#808080",
-    TileState.CONNECTING: "#e0a030",
-    TileState.PLAYING: "#3fbf5f",
-    TileState.BACKOFF: "#e0a030",
-    TileState.AUTH_FAILED: "#e04040",
-    TileState.NO_PLAYER: "#e04040",
+# Jeton de couleur du liseré par état. La couleur n'apparaît QUE lorsqu'il y a
+# quelque chose à signaler : une tuile qui lit correctement n'a qu'un cerne
+# neutre. Un mur sain est donc entièrement gris — le moindre liseré coloré se
+# repère de loin, sans avoir à lire une pastille de 10 px.
+_BEZEL_TOKENS = {
+    TileState.IDLE: "bezel_idle",
+    TileState.CONNECTING: "warn",
+    TileState.PLAYING: "bezel",
+    TileState.BACKOFF: "warn",
+    TileState.AUTH_FAILED: "danger",
+    TileState.NO_PLAYER: "danger",
 }
+
+_BEZEL_PX = 2               # constant : voir theme.py (« bezel »)
 
 
 def snapshot_path(camera) -> str:
@@ -237,18 +244,9 @@ class VideoTile(QFrame):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self._header = QWidget()
-        h = QHBoxLayout(self._header)
-        h.setContentsMargins(8, 4, 8, 4)
-        self._dot = QLabel()
-        self._dot.setFixedSize(10, 10)
-        self._title = QLabel(f"{self.camera.nom} — {self.camera.site.nom}")
-        self._flux_label = QLabel(self._flux_text())
-        h.addWidget(self._dot)
-        h.addWidget(self._title)
-        h.addStretch()
-        h.addWidget(self._flux_label)
-        root.addWidget(self._header)
+        from .widgets import TileCaption
+        self._caption = TileCaption(self.camera.nom, self.camera.site.nom)
+        self._caption.set_data(self._flux_text())
 
         body = QWidget()
         self._stack = QStackedLayout(body)
@@ -271,6 +269,7 @@ class VideoTile(QFrame):
         self._stack.addWidget(self._video)    # index 1 — toujours visible dessous
         self._stack.setCurrentIndex(0)        # l'état reste la couche haute
         root.addWidget(body, 1)
+        root.addWidget(self._caption)          # identité SOUS l'image
 
         # barre de commandes (vue mono) : zoom numérique + PTZ si motorisée
         if self.vue == "mono":
@@ -284,61 +283,87 @@ class VideoTile(QFrame):
         """(Ré)applique les couleurs du thème courant sans couper le flux."""
         from .theme import t
         self._apply_frame_style()
-        self._header.setStyleSheet(f"background-color: {t('tile_header')};")
-        self._title.setStyleSheet(f"color: {t('text')}; font-weight: 600;")
-        self._flux_label.setStyleSheet(f"color: {t('text_dim')};")
+        self._caption.restyle()
         self._status.setStyleSheet(
             f"color: {t('tile_status_text')}; background-color: {t('video_bg')}; "
             f"padding: 12px;")
-        self._dot.setStyleSheet(
-            f"background-color: {_DOT_COLORS[self.state]}; border-radius: 5px;")
         if self._controls is not None:
             self._controls.setStyleSheet(f"background-color: {t('tile_header')};")
 
     def _apply_frame_style(self):
+        """Le liseré EST l'indicateur d'état — d'où l'absence de pastille.
+
+        Sa largeur ne change jamais : la surface vidéo n'est donc pas
+        redimensionnée à chaque changement d'état (mpv reste tranquille)."""
         from .theme import t
-        couleur = t("danger") if self._motion_on else t("border")
-        largeur = 3 if self._motion_on else 1
+        couleur = t("text") if self._motion_on else t(_BEZEL_TOKENS[self.state])
         self.setStyleSheet(
             f"VideoTile {{ background-color: {t('tile_bg')}; "
-            f"border: {largeur}px solid {couleur}; }}")
+            f"border: {_BEZEL_PX}px solid {couleur}; }}")
 
     def _build_controls(self) -> QWidget:
+        """Barre de commandes de la vue plein cadre.
+
+        Deux amas nommés, aux extrémités : à gauche ce qui bouge la caméra
+        (orientation, zoom optique), à droite ce qui ne fait que recadrer
+        l'image reçue (zoom numérique). Sans ces intitulés, deux jeux de
+        boutons « + / − » voisins laissaient croire qu'ils font la même
+        chose."""
+        from .theme import police_ui, t
+
         bar = QWidget()
         h = QHBoxLayout(bar)
-        h.setContentsMargins(6, 3, 6, 3)
-        h.setSpacing(4)
+        h.setContentsMargins(8, 4, 8, 5)
+        h.setSpacing(3)
+
+        def intitule(texte: str) -> QLabel:
+            lbl = QLabel(texte)
+            lbl.setObjectName("hint")
+            lbl.setFont(police_ui(12))
+            lbl.setStyleSheet(f"color: {t('text_faint')}; background: transparent;")
+            return lbl
+
+        def touche(libelle: str, tip: str, largeur: int = 32) -> QPushButton:
+            b = QPushButton(libelle)
+            b.setObjectName("compact")
+            b.setFixedWidth(largeur)
+            b.setToolTip(tip)
+            return b
 
         if self.camera.ptz:
-            for libelle, dx, dy, dz, info in (
-                ("↖", -0.5, 0.5, 0, "haut-gauche"), ("↑", 0, 0.5, 0, "haut"),
-                ("↗", 0.5, 0.5, 0, "haut-droite"), ("←", -0.5, 0, 0, "gauche"),
-                ("→", 0.5, 0, 0, "droite"), ("↙", -0.5, -0.5, 0, "bas-gauche"),
-                ("↓", 0, -0.5, 0, "bas"), ("↘", 0.5, -0.5, 0, "bas-droite"),
+            h.addWidget(intitule("Orientation"))
+            h.addSpacing(4)
+            for libelle, dx, dy, info in (
+                ("↖", -0.5, 0.5, "haut-gauche"), ("↑", 0, 0.5, "haut"),
+                ("↗", 0.5, 0.5, "haut-droite"), ("←", -0.5, 0, "gauche"),
+                ("→", 0.5, 0, "droite"), ("↙", -0.5, -0.5, "bas-gauche"),
+                ("↓", 0, -0.5, "bas"), ("↘", 0.5, -0.5, "bas-droite"),
             ):
-                b = QPushButton(libelle)
-                b.setObjectName("compact"); b.setFixedWidth(30)
-                b.setToolTip(f"Orientation {info} (maintenir enfoncé)")
-                b.pressed.connect(lambda x=dx, y=dy, z=dz: self._ptz(x, y, z))
+                b = touche(libelle, f"Orienter vers le {info} (maintenir enfoncé)")
+                b.pressed.connect(lambda x=dx, y=dy: self._ptz(x, y, 0))
                 b.released.connect(self._ptz_stop)
                 h.addWidget(b)
-            zin = QPushButton("Z+"); zin.setObjectName("compact"); zin.setFixedWidth(34)
-            zin.setToolTip("Zoom optique (maintenir enfoncé)")
-            zin.pressed.connect(lambda: self._ptz(0, 0, 0.5)); zin.released.connect(self._ptz_stop)
-            zout = QPushButton("Z−"); zout.setObjectName("compact"); zout.setFixedWidth(34)
-            zout.setToolTip("Dézoom optique (maintenir enfoncé)")
-            zout.pressed.connect(lambda: self._ptz(0, 0, -0.5)); zout.released.connect(self._ptz_stop)
-            h.addWidget(zin); h.addWidget(zout)
-            h.addSpacing(10)
 
-        h.addStretch()
-        lbl = QLabel("Zoom"); lbl.setObjectName("hint")
-        h.addWidget(lbl)
-        for txt, fn, tip in (("＋", self.zoom_in, "Zoom numérique avant"),
-                             ("－", self.zoom_out, "Zoom numérique arrière"),
-                             ("⟳", self.zoom_reset, "Réinitialiser le zoom")):
-            b = QPushButton(txt); b.setObjectName("compact"); b.setFixedWidth(32)
-            b.setToolTip(tip)
+            h.addSpacing(14)
+            h.addWidget(intitule("Zoom optique"))
+            h.addSpacing(4)
+            for libelle, dz, tip in (("+", 0.5, "Zoom optique (maintenir enfoncé)"),
+                                     ("−", -0.5, "Dézoom optique (maintenir enfoncé)")):
+                b = touche(libelle, tip)
+                b.pressed.connect(lambda z=dz: self._ptz(0, 0, z))
+                b.released.connect(self._ptz_stop)
+                h.addWidget(b)
+
+        h.addStretch(1)
+        h.addWidget(intitule("Zoom numérique"))
+        h.addSpacing(4)
+        for libelle, fn, tip in (("+", self.zoom_in, "Agrandir l'image reçue"),
+                                 ("−", self.zoom_out, "Réduire l'agrandissement"),
+                                 ("", self.zoom_reset, "Revenir au cadrage d'origine")):
+            b = touche(libelle, tip)
+            if not libelle:
+                b.setIcon(icon("rotate"))       # glyphe ⟳ absent de trop de polices
+                b.setIconSize(QSize(13, 13))
             b.clicked.connect(fn)
             h.addWidget(b)
         return bar
@@ -350,8 +375,7 @@ class VideoTile(QFrame):
 
     def _set_state(self, state: TileState, message: str = ""):
         self.state = state
-        self._dot.setStyleSheet(
-            f"background-color: {_DOT_COLORS[state]}; border-radius: 5px;")
+        self._apply_frame_style()
         if state == TileState.PLAYING:
             # on cache l'étiquette au lieu de changer de page : la surface
             # vidéo ne doit jamais être dé-mappée/re-mappée (voir _build_ui)
@@ -366,8 +390,13 @@ class VideoTile(QFrame):
         event.accept()
 
     def set_motion(self, actif: bool):
+        """Mouvement détecté : le liseré et le bandeau passent en blanc.
+
+        Achromatique volontairement — un mouvement n'est pas une panne, et le
+        rouge reste réservé aux tuiles réellement en défaut."""
         self._motion_on = actif
         self._apply_frame_style()
+        self._caption.alerte(actif)
 
     def contextMenuEvent(self, event):
         from .icons import icon
@@ -531,7 +560,7 @@ class VideoTile(QFrame):
                 bps = 0.0
         self.debit_bps = bps
         base = self._flux_text()
-        self._flux_label.setText(f"{base} · {format_debit(bps)}" if bps else base)
+        self._caption.set_data(f"{base} · {format_debit(bps)}" if bps else base)
 
     # ---------------------------------------------------------- cycle de vie
 
@@ -556,7 +585,7 @@ class VideoTile(QFrame):
         self._preventive_timer.stop()
         self._debit_timer.stop()
         self.debit_bps = 0.0
-        self._flux_label.setText(self._flux_text())
+        self._caption.set_data(self._flux_text())
         if self._player is not None:
             try:
                 self._player.command("stop")

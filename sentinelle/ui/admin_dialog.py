@@ -15,17 +15,18 @@ import threading
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
-                               QDialogButtonBox, QFormLayout, QGroupBox,
-                               QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMessageBox,
-                               QPushButton, QSpinBox, QTabWidget, QVBoxLayout,
-                               QWidget)
+                               QDialogButtonBox, QFormLayout, QGridLayout,
+                               QGroupBox, QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem,
+                               QMessageBox, QPlainTextEdit, QPushButton,
+                               QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
 from ..config import AppConfig, Etape, Sequence
 from .camera_picker import CameraPicker
 from .config_dialogs import CameraManagerWidget
 from .icons import icon
 from .texte import compte
+from .theme import police_data
 from .sequence_editor import StepsEditor, dupliquer_sequence
 
 
@@ -36,7 +37,7 @@ class UserEditDialog(QDialog):
         super().__init__(parent)
         self._user = user or {}
         self.setWindowTitle("Compte" if user else "Nouveau compte")
-        self.setMinimumSize(460, 560)
+        self.setMinimumSize(760, 680)
 
         self._nom = QLineEdit(self._user.get("username", ""))
         self._nom.setPlaceholderText("identifiant de connexion")
@@ -87,9 +88,14 @@ class UserEditDialog(QDialog):
         boutons.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 14)
+        lay.setSpacing(12)
         lay.addLayout(form)
         lay.addWidget(self._grp_droits, 1)
         lay.addWidget(boutons)
+
+        from .widgets import MemoireGeometrie
+        MemoireGeometrie(self, "compte", fraction=0.72, maxi=(1000, 900))
         self._maj_droits()
 
     def _maj_droits(self):
@@ -157,13 +163,19 @@ class UsersWidget(QWidget):
         btn_rev.clicked.connect(self._revoquer)
         btn_del = QPushButton(icon("trash"), " Supprimer")
         btn_del.clicked.connect(self._supprimer)
+        # créer à gauche, agir sur le compte sélectionné à droite : alignés dans
+        # une seule rangée, les cinq boutons laissaient croire qu'ils font tous
+        # la même sorte de chose
         col = QHBoxLayout()
-        for b in (btn_add, btn_edit, btn_pwd, btn_rev, btn_del):
-            col.addWidget(b)
+        col.setSpacing(6)
+        col.addWidget(btn_add)
         col.addStretch(1)
+        for b in (btn_edit, btn_pwd, btn_rev, btn_del):
+            col.addWidget(b)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
         lay.addLayout(col)
         lay.addWidget(self._liste, 1)
         self._charger()
@@ -365,18 +377,38 @@ class RondesWidget(QWidget):
         self._liste.currentRowChanged.connect(self._selection_changee)
         btn_nouv = QPushButton(icon("plus"), " Nouvelle")
         btn_nouv.clicked.connect(self._nouvelle)
-        btn_ren = QPushButton(icon("pencil"), " Renommer")
+        # colonne étroite : les trois actions sur la ronde sélectionnée sont en
+        # icônes seules (avec bulle d'aide), sinon quatre boutons libellés ne
+        # tiennent pas côte à côte quand le panneau est à sa taille minimale
+        btn_ren = QPushButton(icon("pencil"), "")
+        btn_ren.setToolTip("Renommer la ronde sélectionnée")
         btn_ren.clicked.connect(self._renommer)
-        btn_dup = QPushButton(icon("copy"), " Dupliquer")
+        btn_dup = QPushButton(icon("copy"), "")
+        btn_dup.setToolTip("Dupliquer la ronde sélectionnée")
         btn_dup.clicked.connect(self._dupliquer)
-        btn_sup = QPushButton(icon("trash"), " Supprimer")
+        btn_sup = QPushButton(icon("trash"), "")
+        btn_sup.setToolTip("Supprimer la ronde sélectionnée")
         btn_sup.clicked.connect(self._supprimer)
+        for b in (btn_ren, btn_dup, btn_sup):
+            b.setFixedWidth(38)
+
+        # même disposition que les autres onglets : les actions sont AU-DESSUS
+        # de la liste, créer à gauche, agir sur la ronde sélectionnée à droite.
+        # Empilés sous la liste et étirés sur toute la colonne, ces boutons
+        # formaient un bloc indistinct.
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        actions.addWidget(btn_nouv)
+        actions.addStretch(1)
+        for b in (btn_ren, btn_dup, btn_sup):
+            actions.addWidget(b)
 
         gauche = QVBoxLayout()
+        gauche.setContentsMargins(0, 0, 0, 0)
+        gauche.setSpacing(10)
         gauche.addWidget(QLabel("Rondes partagées :"))
+        gauche.addLayout(actions)
         gauche.addWidget(self._liste, 1)
-        for b in (btn_nouv, btn_ren, btn_dup, btn_sup):
-            gauche.addWidget(b)
 
         # ---- colonne de droite : étapes + attribution ----
         self._steps = StepsEditor(cfg, self)
@@ -585,6 +617,279 @@ class RondesWidget(QWidget):
         return [s.nom for s in self._rondes if not s.etapes]
 
 
+def _duree(secondes: int) -> str:
+    """« 3 j 04 h 12 », « 41 min », « 18 s »."""
+    s = max(0, int(secondes))
+    if s < 60:
+        return f"{s} s"
+    if s < 3600:
+        return f"{s // 60} min"
+    if s < 86400:
+        return f"{s // 3600} h {(s % 3600) // 60:02d}"
+    return f"{s // 86400} j {(s % 86400) // 3600:02d} h {(s % 3600) // 60:02d}"
+
+
+def _octets(n: int) -> str:
+    for unite, seuil in (("To", 1 << 40), ("Go", 1 << 30), ("Mo", 1 << 20)):
+        if n >= seuil:
+            return f"{n / seuil:.1f} {unite}"
+    return f"{n} o"
+
+
+class ServeurWidget(QWidget):
+    """État du serveur et conduite du service, depuis le client.
+
+    Le but est de ne plus avoir à ouvrir une session SSH pour les gestes
+    courants : vérifier que le relais tourne, relire une configuration éditée
+    sur le serveur, consulter les dernières lignes de journal, relancer le
+    service après une mise à jour d'image.
+    """
+
+    _etat = Signal(object, str)              # (dict|None, erreur)
+    _journal = Signal(object, str)            # (lignes|None, erreur)
+    _action = Signal(str, str, str)           # (action, message, erreur)
+
+    _CHAMPS = (("version", "Version"),
+               ("uptime", "En fonctionnement"),
+               ("systeme", "Système"),
+               ("donnees", "Dossier de données"),
+               ("parc", "Parc"),
+               ("comptes", "Comptes"),
+               ("relais", "Relais de flux"),
+               ("mouvement", "Mouvement"))
+
+    def __init__(self, remote, parent=None):
+        super().__init__(parent)
+        self._remote = remote
+        self._etat.connect(self._on_etat)
+        self._journal.connect(self._on_journal)
+        self._action.connect(self._on_action)
+
+        # ---- état ----
+        self._valeurs: dict[str, QLabel] = {}
+        grille = QGridLayout()
+        grille.setContentsMargins(12, 8, 12, 8)
+        grille.setHorizontalSpacing(24)
+        grille.setVerticalSpacing(7)
+        for ligne, (cle, libelle) in enumerate(self._CHAMPS):
+            intitule = QLabel(f"{libelle} :")
+            intitule.setObjectName("hint")
+            valeur = QLabel("—")
+            valeur.setFont(police_data(12))
+            valeur.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self._valeurs[cle] = valeur
+            grille.addWidget(intitule, ligne, 0, Qt.AlignRight | Qt.AlignVCenter)
+            grille.addWidget(valeur, ligne, 1)
+        grille.setColumnStretch(1, 1)
+        self._btn_maj = QPushButton(icon("rotate"), " Rafraîchir")
+        self._btn_maj.clicked.connect(self.rafraichir)
+        grp_etat = QGroupBox("État du serveur")
+        ve = QVBoxLayout(grp_etat)
+        ve.setContentsMargins(0, 8, 12, 8)
+        ve.setSpacing(6)
+        tete_etat = QHBoxLayout()
+        tete_etat.addStretch(1)
+        tete_etat.addWidget(self._btn_maj)
+        ve.addLayout(tete_etat)
+        ve.addLayout(grille)
+
+        # ---- actions ----
+        self._btn_reload = QPushButton(icon("rotate"), " Recharger la configuration")
+        self._btn_reload.setToolTip("Relit config.yaml et users.yaml sur le "
+                                    "serveur, sans couper les flux en cours")
+        self._btn_reload.clicked.connect(self._recharger)
+        self._btn_restart = QPushButton(icon("power"), " Redémarrer le service")
+        self._btn_restart.setToolTip("Arrête le serveur ; le conteneur le "
+                                     "relance automatiquement")
+        self._btn_restart.clicked.connect(self._redemarrer)
+        aide = QLabel("Recharger suffit après une modification de fichier sur "
+                      "le serveur. Le redémarrage coupe les flux quelques "
+                      "secondes : les murs d'images se reconnectent seuls.")
+        aide.setObjectName("hint")
+        aide.setWordWrap(True)
+        grp_actions = QGroupBox("Conduite du service")
+        va = QVBoxLayout(grp_actions)
+        va.setContentsMargins(12, 8, 12, 10)
+        va.setSpacing(10)
+        rangee = QHBoxLayout()
+        rangee.setSpacing(8)
+        rangee.addWidget(self._btn_reload)
+        rangee.addWidget(self._btn_restart)
+        rangee.addStretch(1)
+        va.addLayout(rangee)
+        va.addWidget(aide)
+
+        # ---- journal ----
+        self._btn_journal = QPushButton(icon("rotate"), " Rafraîchir")
+        self._btn_journal.clicked.connect(self._charger_journal)
+        self._texte_journal = QPlainTextEdit()
+        self._texte_journal.setReadOnly(True)
+        self._texte_journal.setFont(police_data(12))
+        self._texte_journal.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self._texte_journal.setPlaceholderText("Journal non chargé.")
+        grp_journal = QGroupBox("Journal récent du serveur")
+        vj = QVBoxLayout(grp_journal)
+        vj.setContentsMargins(12, 8, 12, 10)
+        vj.setSpacing(8)
+        tete = QHBoxLayout()
+        tete.addStretch(1)
+        tete.addWidget(self._btn_journal)
+        vj.addLayout(tete)
+        vj.addWidget(self._texte_journal, 1)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+        lay.addWidget(grp_etat)
+        lay.addWidget(grp_actions)
+        lay.addWidget(grp_journal, 1)
+
+    # ------------------------------------------------------------------ lecture
+
+    def rafraichir(self):
+        """Interroge le serveur hors du thread UI (réseau lent = fenêtre gelée)."""
+        self._btn_maj.setEnabled(False)
+        remote = self._remote
+
+        def work():
+            from ..remote import ErreurServeur
+            data, err = None, ""
+            try:
+                data = remote.server_status()
+            except ErreurServeur as e:
+                err = str(e) or "serveur injoignable"
+            except Exception as e:
+                err = str(e) or "erreur inattendue"
+            try:
+                self._etat.emit(data, err)
+            except RuntimeError:
+                pass                        # panneau fermé entre-temps
+        threading.Thread(target=work, daemon=True, name="server-status").start()
+
+    def _on_etat(self, data, erreur: str):
+        self._btn_maj.setEnabled(True)
+        if data is None:
+            for v in self._valeurs.values():
+                v.setText("—")
+            self._valeurs["version"].setText(f"indisponible ({erreur})")
+            return
+        c = data.get("comptes") or {}
+        lieu = data.get("data_dir", "?")
+        if data.get("disque_total"):
+            lieu += (f"  ·  {_octets(data['disque_libre'])} libres "
+                     f"sur {_octets(data['disque_total'])}")
+        systeme = f"{data.get('systeme', '?')}  ·  Python {data.get('python', '?')}"
+        if data.get("conteneur"):
+            systeme += "  ·  conteneur"
+        cams = compte(data.get("cameras", 0), "caméra")
+        if data.get("cameras_4g"):
+            cams += f" (dont {data['cameras_4g']} en 4G)"
+        textes = {
+            "version": str(data.get("version", "?")),
+            "uptime": _duree(data.get("uptime_s", 0)),
+            "systeme": systeme,
+            "donnees": lieu,
+            "parc": f"{cams}  ·  {compte(data.get('sites', 0), 'site')}"
+                    f"  ·  {compte(data.get('rondes', 0), 'ronde partagée', 'rondes partagées')}",
+            "comptes": f"{compte(c.get('admin', 0), 'administrateur')}"
+                       f"  ·  {compte(c.get('user', 0), 'utilisateur')}"
+                       f"  ·  {compte(c.get('service', 0), 'compte de service', 'comptes de service')}",
+            "relais": ("prêt" if data.get("relais_pret")
+                       else f"indisponible — {data.get('relais_erreur') or 'cause inconnue'}"),
+            "mouvement": (compte(data.get("mouvement_actif", 0), "caméra en mouvement",
+                                 "caméras en mouvement")),
+        }
+        for cle, texte in textes.items():
+            self._valeurs[cle].setText(texte)
+
+    def _charger_journal(self):
+        self._btn_journal.setEnabled(False)
+        remote = self._remote
+
+        def work():
+            from ..remote import ErreurServeur
+            lignes, err = None, ""
+            try:
+                lignes = remote.server_logs(200)
+            except ErreurServeur as e:
+                err = str(e) or "serveur injoignable"
+            except Exception as e:
+                err = str(e) or "erreur inattendue"
+            try:
+                self._journal.emit(lignes, err)
+            except RuntimeError:
+                pass
+        threading.Thread(target=work, daemon=True, name="server-logs").start()
+
+    def _on_journal(self, lignes, erreur: str):
+        self._btn_journal.setEnabled(True)
+        if lignes is None:
+            self._texte_journal.setPlainText(f"Journal indisponible : {erreur}")
+            return
+        from datetime import datetime
+        rendu = []
+        for l in lignes:
+            heure = datetime.fromtimestamp(l.get("t", 0)).strftime("%d/%m %H:%M:%S")
+            rendu.append(f"{heure}  {l.get('niveau', ''):<7} "
+                         f"{l.get('source', '')}: {l.get('texte', '')}")
+        self._texte_journal.setPlainText("\n".join(rendu) or "Journal vide.")
+        barre = self._texte_journal.verticalScrollBar()
+        barre.setValue(barre.maximum())        # les lignes récentes sont en bas
+
+    # ------------------------------------------------------------------ actions
+
+    def _recharger(self):
+        self._lancer("reload", self._remote.server_reload,
+                     "Configuration rechargée sur le serveur")
+
+    def _redemarrer(self):
+        r = QMessageBox.question(
+            self, "Redémarrer le service",
+            "Le serveur va s'arrêter et être relancé automatiquement.\n\n"
+            "Les flux sont coupés quelques secondes ; tous les murs d'images "
+            "se reconnectent seuls ensuite.\n\nRedémarrer maintenant ?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if r != QMessageBox.Yes:
+            return
+        self._lancer("restart", self._remote.server_restart,
+                     "Redémarrage demandé — le serveur revient dans quelques secondes")
+
+    def _lancer(self, nom: str, appel, message: str):
+        self._btn_reload.setEnabled(False)
+        self._btn_restart.setEnabled(False)
+
+        def work():
+            from ..remote import ErreurServeur
+            err = ""
+            try:
+                appel()
+            except ErreurServeur as e:
+                err = str(e) or "serveur injoignable"
+            except Exception as e:
+                err = str(e) or "erreur inattendue"
+            try:
+                self._action.emit(nom, message, err)
+            except RuntimeError:
+                pass
+        threading.Thread(target=work, daemon=True, name=f"server-{nom}").start()
+
+    def _on_action(self, nom: str, message: str, erreur: str):
+        self._btn_reload.setEnabled(True)
+        self._btn_restart.setEnabled(True)
+        from .toast import toast
+        if erreur:
+            # un redémarrage coupe la connexion : l'erreur réseau est alors
+            # normale, pas un échec
+            if nom == "restart":
+                toast(self.window(), message, "info")
+            else:
+                QMessageBox.warning(self, "Serveur", erreur)
+            return
+        toast(self.window(), message, "ok")
+        if nom == "reload":
+            self.rafraichir()
+
+
 class AdminDialog(QDialog):
     """Panneau d'administration global (onglets)."""
 
@@ -601,7 +906,7 @@ class AdminDialog(QDialog):
         self._sauve_termine.connect(self._on_sauve_termine)
         self.setWindowTitle("Administration du serveur")
         self.setWindowIcon(icon("settings"))
-        self.setMinimumSize(820, 660)
+        self.setMinimumSize(900, 620)
 
         self._tabs = QTabWidget()
         self._manager = CameraManagerWidget(cfg, self)
@@ -621,28 +926,37 @@ class AdminDialog(QDialog):
 
         reglages = QWidget()
         rl = QVBoxLayout(reglages)
+        rl.setContentsMargins(0, 0, 0, 0)     # l'onglet fournit déjà la marge
         self._rot = QSpinBox(); self._rot.setRange(3, 3600); self._rot.setSuffix(" s")
         self._rot.setValue(cfg.rotation_duree_s)
         self._rot.setMaximumWidth(140)
         grp = QGroupBox("Réglages généraux")
         gf = QFormLayout(grp)
         gf.setContentsMargins(12, 8, 12, 8); gf.setHorizontalSpacing(18)
-        gf.addRow("Durée de rotation par défaut :", self._rot)
+        gf.addRow("Défilement par défaut toutes les :", self._rot)
         rl.addWidget(grp)
 
         # mode de fonctionnement de CE poste (action admin)
         mode = QGroupBox("Mode de fonctionnement de ce poste")
-        mv = QVBoxLayout(mode)
-        mv.setContentsMargins(12, 8, 12, 8)
+        mv = QHBoxLayout(mode)               # côte à côte, largeur naturelle :
+        mv.setContentsMargins(12, 8, 12, 8)  # étirés, ils barraient tout l'écran
+        mv.setSpacing(8)
         btn_autre = QPushButton(icon("search"), " Connecter à un autre serveur…")
         btn_autre.clicked.connect(self._changer_serveur)
         btn_local = QPushButton(icon("lock"), " Repasser en mode autonome")
         btn_local.clicked.connect(self._repasser_local)
         mv.addWidget(btn_autre)
         mv.addWidget(btn_local)
+        mv.addStretch(1)
         rl.addWidget(mode)
         rl.addStretch(1)
         self._tabs.addTab(reglages, icon("settings"), "Réglages")
+
+        # état et conduite du serveur : chargé à l'affichage de l'onglet, pas à
+        # l'ouverture du panneau (deux requêtes de plus au démarrage sinon)
+        self._serveur = ServeurWidget(remote, self)
+        self._tabs.addTab(self._serveur, icon("monitor"), "Serveur")
+        self._tabs.currentChanged.connect(self._onglet_change)
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         boutons.button(QDialogButtonBox.Ok).setText("Enregistrer")
@@ -653,6 +967,19 @@ class AdminDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.addWidget(self._tabs, 1)
         lay.addWidget(boutons)
+
+        # s'ouvre en grand : ce panneau sert à lire un parc entier
+        from .widgets import MemoireGeometrie
+        MemoireGeometrie(self, "admin")
+
+    def _onglet_change(self, index: int):
+        """Charge l'état du serveur au premier affichage de son onglet."""
+        if self._tabs.widget(index) is not self._serveur:
+            return
+        if not getattr(self, "_serveur_charge", False):
+            self._serveur_charge = True
+            self._serveur.rafraichir()
+            self._serveur._charger_journal()
 
     def _modifications_en_attente(self) -> bool:
         return (self._manager.modifie or self._users.modifie

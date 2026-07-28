@@ -113,6 +113,18 @@ class Store:
 
     # ----------------------------------------------------------- configuration
 
+    def recharger(self) -> list[str]:
+        """Relit config.yaml et users.yaml depuis le disque.
+
+        Permet de prendre en compte un fichier édité directement sur le
+        serveur sans redémarrer le service — donc sans couper les flux en
+        cours. Retourne les avertissements de validation de la config."""
+        with self.lock:
+            nouveau = load_config(self.config_path)
+            self.cfg = nouveau
+            self.users.recharger()
+            return list(nouveau.warnings)
+
     def remplacer_config(self, data: dict) -> list[str]:
         """Valide puis applique une configuration complète (dict au format YAML
         du client). Un mot de passe vide conserve la valeur déjà stockée pour la

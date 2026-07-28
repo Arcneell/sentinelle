@@ -127,9 +127,17 @@ class StepsEditor(QWidget):
         self._btn_down = QPushButton(icon("arrow-down"), "")
         self._btn_down.setToolTip("Descendre l'étape")
         self._btn_down.clicked.connect(lambda: self._deplacer(+1))
+        # les deux flèches sont carrées : étirées comme les autres, elles
+        # devenaient deux grands boutons vides au milieu de la rangée
+        for b in (self._btn_up, self._btn_down):
+            b.setFixedWidth(38)
+
+        # ajouter à gauche, agir sur l'étape sélectionnée à droite
         ligne = QHBoxLayout()
-        for b in (self._btn_add, self._btn_mod, self._btn_del,
-                  self._btn_up, self._btn_down):
+        ligne.setSpacing(6)
+        ligne.addWidget(self._btn_add)
+        ligne.addStretch(1)
+        for b in (self._btn_mod, self._btn_del, self._btn_up, self._btn_down):
             ligne.addWidget(b)
 
         self._info = QLabel("")
@@ -138,9 +146,10 @@ class StepsEditor(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
         lay.addWidget(QLabel("Étapes (jouées en boucle, glisser pour réordonner) :"))
-        lay.addWidget(self._liste, 1)
-        lay.addLayout(ligne)
+        lay.addLayout(ligne)               # actions au-dessus de la liste,
+        lay.addWidget(self._liste, 1)      # comme partout ailleurs
         lay.addWidget(self._info)
 
         self.set_sequence(None)
@@ -261,19 +270,33 @@ class SequenceEditor(QDialog):
         self._btn_dup.clicked.connect(self._dupliquer)
         self._btn_sup = QPushButton(icon("trash"), " Supprimer")
         self._btn_sup.clicked.connect(self._supprimer)
+        # colonne étroite : icônes seules pour les actions sur la sélection
+        for b, aide in ((self._btn_ren, "Renommer la ronde sélectionnée"),
+                        (self._btn_dup, "Copier cette ronde en ronde "
+                                        "personnelle modifiable"),
+                        (self._btn_sup, "Supprimer la ronde sélectionnée")):
+            b.setText("")
+            b.setToolTip(aide)
+            b.setFixedWidth(38)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        actions.addWidget(btn_nouv)
+        actions.addStretch(1)
+        for b in (self._btn_ren, self._btn_dup, self._btn_sup):
+            actions.addWidget(b)
 
         gauche = QVBoxLayout()
+        gauche.setSpacing(10)
         gauche.addWidget(QLabel("Rondes :"))
+        gauche.addLayout(actions)              # actions au-dessus de la liste
         gauche.addWidget(self._seqs, 1)
-        gauche.addWidget(btn_nouv)
-        gauche.addWidget(self._btn_ren)
-        gauche.addWidget(self._btn_dup)
-        gauche.addWidget(self._btn_sup)
 
         self._steps = StepsEditor(cfg, self)
         self._steps.modifie.connect(self._etapes_modifiees)
 
         centre = QHBoxLayout()
+        centre.setSpacing(16)
         centre.addLayout(gauche, 1)
         centre.addWidget(self._steps, 2)
 
@@ -284,6 +307,8 @@ class SequenceEditor(QDialog):
         boutons.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 14)
+        lay.setSpacing(14)
         lay.addLayout(centre, 1)
         lay.addWidget(boutons)
 

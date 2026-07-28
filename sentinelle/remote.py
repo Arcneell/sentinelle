@@ -149,6 +149,25 @@ class ServeurDistant:
         except Exception:
             return []
 
+    # -------------------------------------------------------- conduite serveur
+
+    def server_status(self) -> dict:
+        """État du serveur : version, fonctionnement, parc, relais, disque."""
+        return _json(self._req("GET", "/api/server/status"))
+
+    def server_logs(self, lignes: int = 200) -> list[dict]:
+        """Dernières lignes du journal du serveur."""
+        return _json(self._req("GET", f"/api/server/logs?lignes={int(lignes)}")
+                     ).get("lignes", [])
+
+    def server_reload(self) -> dict:
+        """Relit les fichiers du dossier de données. Aucune coupure de flux."""
+        return _json(self._req("POST", "/api/server/reload"))
+
+    def server_restart(self) -> dict:
+        """Arrête le service ; le conteneur le relance (quelques secondes)."""
+        return _json(self._req("POST", "/api/server/restart"))
+
     # ------------------------------------------------------------------ HTTP
 
     def _req(self, methode: str, chemin: str, **kwargs) -> requests.Response:

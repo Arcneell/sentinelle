@@ -13,7 +13,7 @@ import math
 import threading
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
+from PySide6.QtGui import QAction, QColor, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QSpinBox, QSplitter,
@@ -26,12 +26,18 @@ from ..config import (AppConfig, load_config, purger_cameras_sequences,
 from .config_dialogs import CameraDialog, ConfigDialog, DvrDialog, SiteDialog
 from .icons import app_icon, icon
 from .photo_tile import PhotoTile
+from .theme import police_data, police_etiquette, police_ui
 from .tile import TileState, VideoTile, format_debit
 
 logger = logging.getLogger(__name__)
 
 MAX_TILES = 16
 CAP_CHOICES = [("Auto (16 max)", 16), ("1×1", 1), ("2×2", 4), ("3×3", 9), ("4×4", 16)]
+# vide qui sépare deux groupes de commandes dans la barre du haut
+_ECART_GROUPE = 20
+# interstice entre tuiles : assez large pour que deux liserés voisins ne se
+# lisent pas comme un seul trait, assez fin pour ne pas gaspiller le mur
+ECART_TUILES = 6
 # espacement entre deux démarrages de tuiles (voir _set_grid) : assez long pour
 # sérialiser les initialisations VA-API, assez court pour remplir un mur de 16
 # en ~3 s
@@ -431,6 +437,7 @@ class MainWindow(QMainWindow):
 
         # --- barre d'état ---
         self._status_streams = QLabel()
+        self._status_streams.setFont(police_data(12))
         self.statusBar().addPermanentWidget(self._status_streams)
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(1000)
@@ -442,17 +449,21 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ barre de titre
 
     def _build_topbar(self) -> QWidget:
+        """Barre du haut en trois groupes séparés par du vide, pas par des
+        filets : vue, automatismes, puis système à droite. Les traits verticaux
+        d'avant ne faisaient que remplir l'espace qui suffit à regrouper."""
         bar = QFrame()
         bar.setObjectName("topbar")
-        bar.setFixedHeight(52)
+        bar.setFixedHeight(48)
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(10, 0, 8, 0)
-        lay.setSpacing(6)
+        lay.setContentsMargins(14, 0, 10, 0)
+        lay.setSpacing(4)
 
         marque = QLabel(APP_NAME)
         marque.setObjectName("brand")
+        marque.setFont(police_etiquette(14))
         lay.addWidget(marque)
-        lay.addWidget(self._sep())
+        lay.addSpacing(_ECART_GROUPE)
 
         # retour grille (actif seulement en vue plein cadre)
         self._act_grid = self._tbtn("grid", "Grille", "Revenir à la grille (Ctrl+G)",
@@ -461,6 +472,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._act_grid)
 
         self._cap_combo = QComboBox()
+        self._cap_combo.setObjectName("dataField")
         for label, _cap in CAP_CHOICES:
             self._cap_combo.addItem(label)
         self._cap_combo.setToolTip("Nombre de caméras affichées par page")
@@ -478,6 +490,7 @@ class MainWindow(QMainWindow):
                                          lambda: self._changer_page(-1))
         self._lbl_page = QLabel("")
         self._lbl_page.setObjectName("pageInfo")
+        self._lbl_page.setFont(police_data(12))
         self._btn_page_suiv = self._tbtn("chevron-right", "", "Page suivante (PgSuiv)",
                                          lambda: self._changer_page(+1))
         nav.addWidget(self._btn_page_prec)
@@ -485,10 +498,11 @@ class MainWindow(QMainWindow):
         nav.addWidget(self._btn_page_suiv)
         self._nav_box.setVisible(False)
         lay.addWidget(self._nav_box)
-        lay.addWidget(self._sep())
+        lay.addSpacing(_ECART_GROUPE)
 
-        # rotation
-        self._act_rotation = self._tbtn("rotate", "Rotation",
+        # défilement automatique des pages (« rotation » se confondait avec la
+        # rotation d'une image)
+        self._act_rotation = self._tbtn("rotate", "Défilement",
                                         "Faire défiler automatiquement les caméras",
                                         self._rotation_basculee, checkable=True)
         lay.addWidget(self._act_rotation)
@@ -498,7 +512,7 @@ class MainWindow(QMainWindow):
         self._rot_spin.setToolTip("Délai avant de passer à la suite")
         self._rot_spin.valueChanged.connect(self._rotation_duree_changee)
         lay.addWidget(self._rot_spin)
-        lay.addWidget(self._sep())
+        lay.addSpacing(_ECART_GROUPE)
 
         # rondes
         self._seq_combo = QComboBox()
@@ -520,13 +534,13 @@ class MainWindow(QMainWindow):
         self._motion_box = QWidget()
         mlay = QHBoxLayout(self._motion_box)
         mlay.setContentsMargins(0, 0, 0, 0)
-        mlay.setSpacing(8)
-        mlay.addWidget(self._sep())
+        mlay.setSpacing(4)
+        mlay.addSpacing(_ECART_GROUPE)
         self._act_motion = self._tbtn("motion", "Mouvement",
                                       "Surligner les caméras qui détectent un mouvement (ONVIF)",
                                       self._motion_basculee, checkable=True)
         mlay.addWidget(self._act_motion)
-        self._act_motion_auto = self._tbtn("grid", "Vue mouvement",
+        self._act_motion_auto = self._tbtn("grid", "Filtrer",
                                            "N'afficher que les caméras en mouvement",
                                            self._motion_auto_basculee, checkable=True)
         mlay.addWidget(self._act_motion_auto)
@@ -535,7 +549,7 @@ class MainWindow(QMainWindow):
         lay.addStretch(1)
 
         # commandes générales, alignées à droite
-        self._act_pause = self._tbtn("pause", "Tout arrêter",
+        self._act_pause = self._tbtn("pause", "Arrêter",
                                      "Fermer tous les flux sans perdre la sélection",
                                      self._pause_basculee, checkable=True)
         lay.addWidget(self._act_pause)
@@ -595,10 +609,12 @@ class MainWindow(QMainWindow):
         entete.setObjectName("sideHeader")
         eh = QHBoxLayout(entete)
         eh.setContentsMargins(14, 10, 10, 10)
-        titre = QLabel("CAMÉRAS")
+        titre = QLabel("Caméras")
         titre.setObjectName("sideTitle")
+        titre.setFont(police_etiquette(11))
         self._side_count = QLabel("")
         self._side_count.setObjectName("sideCount")
+        self._side_count.setFont(police_data(12))
         btn_tout = self._tbtn("check-square", "", "Cocher toutes les caméras",
                               self._tout_cocher)
         btn_rien = self._tbtn("square", "", "Tout décocher", self._tout_decocher)
@@ -659,8 +675,9 @@ class MainWindow(QMainWindow):
         self._grid_page = QWidget()
         self._grid_page.setObjectName("gridPage")
         self._grid_layout = QGridLayout(self._grid_page)
-        self._grid_layout.setContentsMargins(3, 3, 3, 3)
-        self._grid_layout.setSpacing(3)
+        self._grid_layout.setContentsMargins(ECART_TUILES, ECART_TUILES,
+                                             ECART_TUILES, ECART_TUILES)
+        self._grid_layout.setSpacing(ECART_TUILES)
 
         from .widgets import EmptyState
         self._placeholder = EmptyState()
@@ -668,7 +685,8 @@ class MainWindow(QMainWindow):
         self._mono_page = QWidget()
         self._mono_page.setObjectName("monoPage")
         self._mono_layout = QVBoxLayout(self._mono_page)
-        self._mono_layout.setContentsMargins(3, 3, 3, 3)
+        self._mono_layout.setContentsMargins(ECART_TUILES, ECART_TUILES,
+                                             ECART_TUILES, ECART_TUILES)
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._grid_page)
@@ -720,7 +738,7 @@ class MainWindow(QMainWindow):
             b.setToolButtonStyle(Qt.ToolButtonIconOnly)
         b.setToolTip(tooltip)
         b.setCheckable(checkable)
-        b.setIconSize(QSize(18, 18))
+        b.setIconSize(QSize(17, 17))
         if checkable:
             b.toggled.connect(slot)
         else:
@@ -728,22 +746,19 @@ class MainWindow(QMainWindow):
         self._icon_widgets.append((b, nom_icone))
         return b
 
-    def _sep(self) -> QFrame:
-        s = QFrame()
-        s.setObjectName("vsep")
-        s.setFrameShape(QFrame.VLine)
-        s.setFixedWidth(1)
-        return s
-
     def _apply_theme_chrome(self):
-        """Applique les couleurs du thème aux zones qui entourent la vidéo."""
+        """Applique les couleurs du thème aux zones qui entourent la vidéo.
+
+        Le lit du mur est le graphite de l'application, pas le quasi-noir du
+        plan vidéo : les tuiles se lisent alors comme des objets posés sur une
+        surface, et non comme des trous dans du noir."""
         from .theme import t
         # sélecteurs par nom : une feuille sans sélecteur se propagerait aux
         # enfants (le bouton de l'écran vide perdait son style)
         self._grid_page.setStyleSheet(
-            f"QWidget#gridPage {{ background-color: {t('video_bg')}; }}")
+            f"QWidget#gridPage {{ background-color: {t('bg')}; }}")
         self._mono_page.setStyleSheet(
-            f"QWidget#monoPage {{ background-color: {t('video_bg')}; }}")
+            f"QWidget#monoPage {{ background-color: {t('bg')}; }}")
         self._placeholder.restyle()
 
     def _all_tiles(self) -> list:
@@ -1026,7 +1041,8 @@ class MainWindow(QMainWindow):
                    for i in range(self._tree.topLevelItemCount())
                    if self._tree.topLevelItem(i).isExpanded()}
 
-        self._tree.blockSignals(True)
+        from .theme import t                 # `t` est aussi une variable de
+        self._tree.blockSignals(True)        # boucle ailleurs : import local
         self._tree.clear()
         for site in self._cfg.sites:
             cams = [c for c in self._cfg.cameras if c.site.id == site.id]
@@ -1034,6 +1050,11 @@ class MainWindow(QMainWindow):
                 continue
             site_item = QTreeWidgetItem([site.nom])
             site_item.setData(0, Qt.UserRole + 1, site.id)
+            # le site est un intitulé de groupe, la caméra une entité : même
+            # partage typographique que le bandeau d'une tuile (site en
+            # monospace grisé, caméra dans la police d'interface)
+            site_item.setFont(0, police_ui(13, gras=True))
+            site_item.setForeground(0, QColor(t("text_dim")))
             if site.lien == "4g":
                 site_item.setData(0, ROLE_BADGES, ["4G"])
             site_item.setFlags(site_item.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
@@ -1386,9 +1407,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------- édition à chaud (clic droit)
 
     def _menu_arbre(self, pos):
+        menu = self._construire_menu_arbre(self._tree.itemAt(pos))
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _construire_menu_arbre(self, item) -> QMenu:
         """Actions rapides sur l'arbre : affichage pour tous, édition de la
-        configuration en mode autonome."""
-        item = self._tree.itemAt(pos)
+        configuration en mode autonome uniquement.
+
+        En mode serveur, le parc est géré sur le serveur : le menu s'arrête
+        donc aux actions d'affichage. Il y proposait « Configuration… », qui
+        n'offre rien d'utile à un simple utilisateur — un administrateur passe
+        par le bouton Administration de la barre du haut."""
         cam_id = item.data(0, Qt.UserRole) if item else None
         site_id = item.data(0, Qt.UserRole + 1) if item else None
 
@@ -1403,15 +1432,11 @@ class MainWindow(QMainWindow):
             menu.addAction(icon("check-square"), f"Cocher tout « {site.nom} »",
                            lambda: self._cocher_tout(True, site_id))
         menu.addAction(icon("square"), "Tout décocher", self._tout_decocher)
-        menu.addSeparator()
 
         if self._remote is not None:
-            # mode serveur : l'édition passe par l'administration / Configuration
-            menu.addAction(icon("settings"), "Configuration…",
-                           self._ouvrir_configuration)
-            menu.exec(self._tree.viewport().mapToGlobal(pos))
-            return
+            return menu
 
+        menu.addSeparator()
         if cam is not None:
             menu.addAction(icon("pencil"), f"Modifier « {cam.nom} »…",
                            lambda: self._modifier_camera(cam_id))
@@ -1427,7 +1452,7 @@ class MainWindow(QMainWindow):
         menu.addAction(icon("plus"), "Ajouter un DVR…", self._ajouter_dvr_rapide)
         menu.addAction(icon("settings"), "Configuration complète…",
                        self._ouvrir_configuration)
-        menu.exec(self._tree.viewport().mapToGlobal(pos))
+        return menu
 
     def _appliquer_et_sauver(self):
         save_config(self._cfg)
@@ -1589,7 +1614,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ divers
 
     def _pause_basculee(self, paused: bool):
-        self._act_pause.setText("Reprendre" if paused else "Tout arrêter")
+        self._act_pause.setText("Reprendre" if paused else "Arrêter")
         self._act_pause.setIcon(icon("play") if paused else icon("pause"))
         if paused:
             self._seq_stop()
