@@ -177,6 +177,13 @@ class ServeurDistant:
     def users_liste(self) -> list[dict]:
         return _json(self._req("GET", "/api/users")).get("users", [])
 
+    def users_revoquer(self, username: str) -> None:
+        """Invalide immédiatement tous les jetons d'un compte (poste volé, ou
+        coupure d'un compte de service dont l'accès aux flux n'expire pas).
+        S'applique tout de suite côté serveur, sans passer par un envoi de la
+        liste des comptes."""
+        self._req("POST", f"/api/users/{quote(username, safe='')}/revoke")
+
     def users_pousser(self, users: list[dict]) -> list[str]:
         r = self._req("PUT", "/api/users", json={"users": users})
         try:
@@ -197,6 +204,9 @@ class ServeurDistant:
 
         relay = p.get("relay") or {}
         self._relay_port = int(relay.get("port", 8554))
+        # hôte annoncé par le serveur ; vide = on garde celui par lequel on a
+        # joint l'API (cas normal, API et relais sur la même machine)
+        self._relay_hote = str(relay.get("host") or "")
         # jeton de portée « relay » = mot de passe RTSP, distinct du jeton de
         # session. JAMAIS de repli sur le jeton de session : l'employer comme mot
         # de passe RTSP le ferait transiter en clair sur le fil (flux non
@@ -258,7 +268,8 @@ class ServeurDistant:
         « relay » (pas le jeton de session) : le relais l'envoie à l'API qui
         vérifie les droits sur la caméra. Cloisonné pour qu'une capture du flux
         RTSP non chiffré ne donne pas accès à l'API HTTP."""
-        hote = urlparse(self.base).hostname or "localhost"
+        hote = (getattr(self, "_relay_hote", "")
+                or urlparse(self.base).hostname or "localhost")
         jeton_relay = getattr(self, "_relay_jeton", "")   # jamais self.jeton (fuite)
         cred = f"sentinelle:{quote(jeton_relay, safe='')}@"
         return f"rtsp://{cred}{hote}:{getattr(self, '_relay_port', 8554)}/"

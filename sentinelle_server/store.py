@@ -8,6 +8,11 @@ server.yaml contient les secrets du serveur, générés au premier démarrage :
   - secret_key : clé de signature des jetons de session
   - relay_port : port RTSP du relais vidéo (les accès sont autorisés par
     l'API à chaque lecture — voir auth externe MediaMTX)
+  - relay_host : nom ou IP du relais annoncé aux clients. Vide (défaut) = les
+    clients emploient l'hôte par lequel ils ont joint l'API, ce qui convient
+    dès que l'API et le relais sont sur la même machine. À ne renseigner que si
+    le relais est joignable à une autre adresse — et il faut alors qu'elle soit
+    valable pour TOUS les consommateurs (murs d'images et analyse vidéo).
 """
 
 import logging
@@ -67,13 +72,22 @@ class Store:
         manquants = [k for k in defauts if not params.get(k)]
         for k in manquants:
             params[k] = defauts[k]()
-        if manquants:
+        # clés dont la valeur vide est légitime : on teste l'ABSENCE, sinon le
+        # fichier serait réécrit à chaque démarrage
+        optionnels = {"relay_host": ""}
+        absents = [k for k in optionnels if k not in params]
+        for k in absents:
+            params[k] = optionnels[k]
+        if manquants or absents:
             with open(chemin, "w", encoding="utf-8") as f:
                 f.write("# Sentinelle Server — secrets générés au premier démarrage.\n"
-                        "# secret_key : signature des jetons de session (ne pas partager).\n")
+                        "# secret_key : signature des jetons de session (ne pas partager).\n"
+                        "# relay_host : hôte du relais annoncé aux clients "
+                        "(vide = hôte de l'API).\n")
                 yaml.safe_dump(params, f, sort_keys=False)
             _restreindre(chemin)               # 0600 : secret de signature des jetons
-            logger.info(f"Secrets serveur générés dans {chemin}")
+            logger.info(f"Paramètres serveur écrits dans {chemin} "
+                        f"({', '.join(manquants + absents)})")
         return params
 
     # ----------------------------------------------------------- configuration

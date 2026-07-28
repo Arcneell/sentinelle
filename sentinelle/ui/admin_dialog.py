@@ -47,8 +47,9 @@ class UserEditDialog(QDialog):
         self._role = QComboBox()
         self._role.addItem("Utilisateur", "user")
         self._role.addItem("Administrateur", "admin")
-        if self._user.get("role") == "admin":
-            self._role.setCurrentIndex(1)
+        self._role.addItem("Service (programme)", "service")
+        idx = self._role.findData(self._user.get("role", "user"))
+        self._role.setCurrentIndex(max(0, idx))
         self._role.currentIndexChanged.connect(self._maj_droits)
 
         form = QFormLayout()
@@ -67,7 +68,16 @@ class UserEditDialog(QDialog):
                                   "et gère le serveur : rien à restreindre ici.")
         self._hint_admin.setObjectName("hint")
         self._hint_admin.setWordWrap(True)
+        self._hint_service = QLabel(
+            "Compte destiné à un programme (analyse vidéo, enregistreur) : il "
+            "lit les flux des caméras cochées ci-dessous et rien d'autre — ni "
+            "administration, ni pilotage des caméras motorisées. Son accès aux "
+            "flux n'expire pas ; pour le couper, utilisez « Déconnecter "
+            "partout » ou changez son mot de passe.")
+        self._hint_service.setObjectName("hint")
+        self._hint_service.setWordWrap(True)
         gd.addWidget(self._hint_admin)
+        gd.addWidget(self._hint_service)
         gd.addWidget(self._picker, 1)
 
         boutons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -84,9 +94,11 @@ class UserEditDialog(QDialog):
 
     def _maj_droits(self):
         # un admin voit tout : les droits par caméra n'ont pas de sens
-        admin = self._role.currentData() == "admin"
+        role = self._role.currentData()
+        admin = role == "admin"
         self._picker.setVisible(not admin)
         self._hint_admin.setVisible(admin)
+        self._hint_service.setVisible(role == "service")
 
     def _valider(self):
         if not self._nom.text().strip():
@@ -120,6 +132,7 @@ class UsersWidget(QWidget):
     """Liste des comptes + création / édition / suppression."""
 
     _charge = Signal(object, str)               # (users|None, erreur) — thread → UI
+    _revoque = Signal(str, str)                 # (username, erreur) — thread → UI
 
     def __init__(self, remote, cfg: AppConfig, parent=None):
         super().__init__(parent)
@@ -128,6 +141,7 @@ class UsersWidget(QWidget):
         self.modifie = False
         self._users: list[dict] = []
         self._charge.connect(self._on_charge)
+        self._revoque.connect(self._on_revoque)
 
         self._liste = QListWidget()
         self._liste.itemDoubleClicked.connect(lambda *_: self._modifier())
@@ -137,10 +151,14 @@ class UsersWidget(QWidget):
         btn_edit.clicked.connect(self._modifier)
         btn_pwd = QPushButton(icon("lock"), " Mot de passe")
         btn_pwd.clicked.connect(self._mot_de_passe)
+        btn_rev = QPushButton(icon("power"), " Déconnecter partout")
+        btn_rev.setToolTip("Invalide immédiatement les accès en cours de ce "
+                           "compte, sans changer son mot de passe")
+        btn_rev.clicked.connect(self._revoquer)
         btn_del = QPushButton(icon("trash"), " Supprimer")
         btn_del.clicked.connect(self._supprimer)
         col = QHBoxLayout()
-        for b in (btn_add, btn_edit, btn_pwd, btn_del):
+        for b in (btn_add, btn_edit, btn_pwd, btn_rev, btn_del):
             col.addWidget(b)
         col.addStretch(1)
 
@@ -151,7 +169,10 @@ class UsersWidget(QWidget):
         self._charger()
 
     def usernames(self) -> list[str]:
-        return [u["username"] for u in self._users]
+        """Comptes attribuables (rondes partagées). Les comptes de service en
+        sont exclus : un programme ne suit pas de ronde."""
+        return [u["username"] for u in self._users
+                if u.get("role") != "service"]
 
     def _charger(self):
         """Charge les comptes HORS du thread UI (l'appel gelait l'ouverture du
@@ -203,7 +224,8 @@ class UsersWidget(QWidget):
             else:
                 ns, nc = len(u.get("sites") or []), len(u.get("cameras") or [])
                 portee = f"{compte(ns, 'site')}, {compte(nc, 'caméra')}"
-            role = "administrateur" if u.get("role") == "admin" else "utilisateur"
+            role = {"admin": "administrateur",
+                    "service": "service"}.get(u.get("role"), "utilisateur")
             it = QListWidgetItem(f"{u['username']}  ·  {role}  ·  {portee}")
             it.setIcon(icon("lock" if u.get("role") == "admin" else "user"))
             it.setData(Qt.UserRole, u["username"])
@@ -256,6 +278,53 @@ class UsersWidget(QWidget):
             return
         u["password"] = mdp
         self.modifie = True
+
+    def _revoquer(self):
+        """Coupe les accès en cours d'un compte. Contrairement au reste du
+        panneau, c'est une action immédiate côté serveur (pas une modification
+        à enregistrer) : c'est le seul moyen de couper un compte de service,
+        dont l'accès aux flux n'expire pas."""
+        u = self._selection()
+        if not u:
+            return
+        nom = u["username"]
+        if u.get("password"):
+            QMessageBox.information(
+                self, "Déconnecter partout",
+                "Un nouveau mot de passe est en attente d'enregistrement pour "
+                "ce compte : il coupera déjà tous ses accès. Enregistrez "
+                "d'abord.")
+            return
+        if QMessageBox.question(
+                self, "Déconnecter partout",
+                f"Invalider immédiatement tous les accès en cours de "
+                f"« {nom} » ?\n\nLes postes connectés avec ce compte devront "
+                f"se reconnecter. Un programme qui lit les flux avec ce compte "
+                f"s'arrêtera jusqu'à sa reconnexion.") != QMessageBox.Yes:
+            return
+        remote = self._remote
+        self.setEnabled(False)
+
+        def work():
+            err = ""
+            try:
+                remote.users_revoquer(nom)
+            except Exception as e:
+                err = str(e) or "erreur inattendue"
+            try:
+                self._revoque.emit(nom, err)
+            except RuntimeError:
+                pass                             # widget détruit entre-temps
+        threading.Thread(target=work, daemon=True, name="admin-revoke").start()
+
+    def _on_revoque(self, nom: str, err: str):
+        self.setEnabled(True)
+        if err:
+            QMessageBox.warning(self, "Déconnecter partout",
+                                f"Révocation impossible : {err}")
+        else:
+            QMessageBox.information(self, "Déconnecter partout",
+                                    f"Accès de « {nom} » invalidés.")
 
     def _supprimer(self):
         u = self._selection()

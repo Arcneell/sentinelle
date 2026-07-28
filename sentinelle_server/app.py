@@ -18,6 +18,7 @@ import json
 import logging
 import threading
 import time
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -105,10 +106,19 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                 return ""
         return ""
 
-    def user_courant(request: Request):
+    def user_courant(request: Request, service_ok: bool = False):
+        """Compte de la session. Un compte de service est refusé par défaut :
+        il ne doit atteindre que les quelques points de lecture qui le
+        concernent (session, streams, snapshot, événements), jamais
+        l'administration, le PTZ ni son propre mot de passe. La liste blanche
+        est portée par les points eux-mêmes (service_ok=True) : un point ajouté
+        plus tard est donc fermé tant qu'on ne l'a pas ouvert explicitement."""
         u = store.users.user_du_jeton(_token(request))
         if u is None:
             raise HTTPException(401, "session invalide — reconnectez-vous")
+        if u.service and not service_ok:
+            raise HTTPException(403, "compte de service : accès limité à la "
+                                     "lecture des flux (/api/streams)")
         return u
 
     def exiger_admin(request: Request):
@@ -159,8 +169,9 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     @app.get("/api/session")
     def session(request: Request):
         """État de la session courante (validité restante du jeton), pour le
-        rafraîchissement proactif côté client."""
-        u = user_courant(request)
+        rafraîchissement proactif côté client. reste_s vaut -1 si le jeton
+        n'expire pas."""
+        u = user_courant(request, service_ok=True)
         return {"ok": True, "username": u.username, "role": u.role,
                 "reste_s": store.users.reste_jeton(_token(request))}
 
@@ -212,6 +223,14 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         return {"ok": True}
 
     # ----------------------------------------------------------- configuration
+
+    def _relay_hote(request: Request) -> str:
+        """Hôte du relais annoncé aux clients : la valeur explicite de
+        server.yaml si elle est renseignée, sinon l'hôte par lequel le client a
+        joint l'API — ce qui est le cas normal, API et relais partageant la même
+        machine."""
+        hote = str(store.params.get("relay_host") or "").strip()
+        return hote or (request.url.hostname or "localhost")
 
     def _boucles_utilisateur(u, visibles: set) -> list[dict]:
         """Boucles personnelles du compte, épurées des caméras devenues
@@ -284,7 +303,8 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             # jeton de portée « relay » : sert UNIQUEMENT de mot de passe RTSP.
             # Distinct du jeton de session (Bearer) pour que sa capture par
             # écoute du flux non chiffré ne donne aucun accès à l'API HTTP.
-            "relay": {"port": int(store.params["relay_port"]),
+            "relay": {"host": _relay_hote(request),
+                      "port": int(store.params["relay_port"]),
                       "token": store.users.emettre_jeton(u, scope=SCOPE_RELAY)},
             "sites": [{"id": s.id, "nom": s.nom, "lien": s.lien}
                       for s in cfg.sites if s.id in sites_utiles],
@@ -298,6 +318,52 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             "sequences": (_rondes_partagees(u, visibles)
                           + _boucles_utilisateur(u, visibles)),
         }
+
+    @app.get("/api/streams")
+    def streams(request: Request):
+        """URLs RTSP prêtes à l'emploi des caméras autorisées.
+
+        Destiné aux consommateurs machine (analyse vidéo type Fuel Watch) qui
+        doivent lire les flux sans connaître les identifiants DVR ni la
+        convention de nommage des chemins du relais. Ils passent ainsi par le
+        relais comme les murs d'images : une seule connexion vers chaque site,
+        quel que soit le nombre de consommateurs.
+
+        Le jeton relay est incrusté dans les URLs : la réponse est un SECRET, à
+        ne pas journaliser ni écrire dans un fichier de configuration lisible.
+        `expire_s` donne la durée de validité — rappeler ce point (ou se
+        reconnecter) avant l'échéance, sinon le relais répondra 401. Un compte
+        de rôle « service » reçoit 0 : son jeton relay n'expire pas, et seule
+        une révocation (ou un changement de mot de passe) le coupe.
+        """
+        u = user_courant(request, service_ok=True)
+        hote = _relay_hote(request)
+        port = int(store.params["relay_port"])
+        jeton = store.users.emettre_jeton(u, scope=SCOPE_RELAY)
+        base = (f"rtsp://{quote(u.username, safe='')}:"
+                f"{quote(jeton, safe='')}@{hote}:{port}/")
+        visibles = store.users.cameras_visibles(u, store.cfg)
+        flux = []
+        for c in store.cfg.cameras:
+            if c.id not in visibles:
+                continue
+            entree = {"camera": c.id, "nom": c.nom,
+                      "site": c.site.id, "site_nom": c.site.nom,
+                      "lien": c.site.lien, "profil": c.profil,
+                      "ptz": bool(c.ptz),
+                      # le snapshot passe par l'API (jeton de session en Basic),
+                      # pas par le relais : utile pour tracer des zones
+                      "snapshot": bool(c.snapshot_url())}
+            # un chemin n'existe sur le relais que si la caméra sait fournir ce
+            # flux (voir Relay.sync) : sinon on renvoie une chaîne vide plutôt
+            # qu'une URL qui échouerait à l'ouverture
+            for vue in ("main", "sub"):
+                entree[vue] = f"{base}{c.id}-{vue}" if c.url(vue) else ""
+            flux.append(entree)
+        return {"version": __version__,
+                "relay": {"host": hote, "port": port},
+                "expire_s": store.users.duree_jeton(u, SCOPE_RELAY),
+                "streams": flux}
 
     @app.put("/api/account/sequences")
     async def mes_boucles(request: Request):
@@ -449,8 +515,8 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     # ---------------------------------------------------------------- médias
 
-    def _cam_autorisee(request: Request, cam_id: str):
-        u = user_courant(request)
+    def _cam_autorisee(request: Request, cam_id: str, service_ok: bool = False):
+        u = user_courant(request, service_ok=service_ok)
         cam = store.cfg.camera(cam_id)
         if cam is None or not u.peut_voir(cam):
             raise HTTPException(404, "caméra inconnue ou non autorisée")
@@ -458,7 +524,9 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     @app.get("/api/snapshot/{cam_id}")
     def snapshot(cam_id: str, request: Request):
-        cam = _cam_autorisee(request, cam_id)
+        # ouvert aux comptes de service : tracer des zones de détection sur une
+        # image fraîche évite un tirage RTSP d'une seule frame
+        cam = _cam_autorisee(request, cam_id, service_ok=True)
         url = cam.snapshot_url()
         if not url:
             raise HTTPException(404, "pas de snapshot pour cette caméra")
@@ -558,7 +626,9 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     @app.get("/api/events")
     async def events(request: Request):
         """Flux SSE des mouvements, limité aux caméras autorisées de l'utilisateur."""
-        u = user_courant(request)
+        # ouvert aux comptes de service : une analyse vidéo peut ne se réveiller
+        # que sur mouvement au lieu d'échantillonner en continu
+        u = user_courant(request, service_ok=True)
         token = _token(request)
         visibles = store.users.cameras_visibles(u, store.cfg)
         q = hub.abonner()
