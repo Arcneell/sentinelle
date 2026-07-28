@@ -1,4 +1,4 @@
 """Sentinelle — visionneuse de vidéosurveillance multi-sites (RTSP, ONVIF)."""
 
-__version__ = "2.1.2"
+__version__ = "2.4.0"
 APP_NAME = "Sentinelle"

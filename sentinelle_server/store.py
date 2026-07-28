@@ -8,6 +8,11 @@ server.yaml contient les secrets du serveur, générés au premier démarrage :
   - secret_key : clé de signature des jetons de session
   - relay_port : port RTSP du relais vidéo (les accès sont autorisés par
     l'API à chaque lecture — voir auth externe MediaMTX)
+  - relay_host : nom ou IP du relais annoncé aux clients. Vide (défaut) = les
+    clients emploient l'hôte par lequel ils ont joint l'API, ce qui convient
+    dès que l'API et le relais sont sur la même machine. À ne renseigner que si
+    le relais est joignable à une autre adresse — et il faut alors qu'elle soit
+    valable pour TOUS les consommateurs (murs d'images et analyse vidéo).
 """
 
 import logging
@@ -20,7 +25,7 @@ import yaml
 
 from sentinelle.config import load_config, save_config
 
-from .auth import Users
+from .auth import Users, _restreindre
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +49,10 @@ class Store:
             logger.warning("=" * 60)
             # trace persistante, lisible une fois puis à supprimer par l'admin
             try:
-                with open(os.path.join(self.data_dir, "admin-initial.txt"), "w",
-                          encoding="utf-8") as f:
+                chemin_admin = os.path.join(self.data_dir, "admin-initial.txt")
+                with open(chemin_admin, "w", encoding="utf-8") as f:
                     f.write(f"identifiant: admin\nmot de passe initial: {mdp}\n")
+                _restreindre(chemin_admin)
             except OSError:
                 pass
 
@@ -56,6 +62,7 @@ class Store:
         chemin = os.path.join(self.data_dir, "server.yaml")
         params = {}
         if os.path.exists(chemin):
+            _restreindre(chemin)               # durcit aussi les installs antérieures au correctif
             with open(chemin, encoding="utf-8") as f:
                 params = yaml.safe_load(f) or {}
         defauts = {
@@ -65,12 +72,22 @@ class Store:
         manquants = [k for k in defauts if not params.get(k)]
         for k in manquants:
             params[k] = defauts[k]()
-        if manquants:
+        # clés dont la valeur vide est légitime : on teste l'ABSENCE, sinon le
+        # fichier serait réécrit à chaque démarrage
+        optionnels = {"relay_host": ""}
+        absents = [k for k in optionnels if k not in params]
+        for k in absents:
+            params[k] = optionnels[k]
+        if manquants or absents:
             with open(chemin, "w", encoding="utf-8") as f:
                 f.write("# Sentinelle Server — secrets générés au premier démarrage.\n"
-                        "# secret_key : signature des jetons de session (ne pas partager).\n")
+                        "# secret_key : signature des jetons de session (ne pas partager).\n"
+                        "# relay_host : hôte du relais annoncé aux clients "
+                        "(vide = hôte de l'API).\n")
                 yaml.safe_dump(params, f, sort_keys=False)
-            logger.info(f"Secrets serveur générés dans {chemin}")
+            _restreindre(chemin)               # 0600 : secret de signature des jetons
+            logger.info(f"Paramètres serveur écrits dans {chemin} "
+                        f"({', '.join(manquants + absents)})")
         return params
 
     # ----------------------------------------------------------- configuration
@@ -93,7 +110,18 @@ class Store:
                     ancien = self.cfg.camera(cam.id)
                     if ancien is not None:
                         cam.password = ancien.password
+            # les rondes partagées se gèrent par /api/rounds : la config poussée
+            # par un client n'écrase jamais celles déjà stockées (une session
+            # admin qui enregistre les caméras ne doit pas remettre un instantané
+            # périmé des rondes modifiées entre-temps)
+            nouveau.sequences = self.cfg.sequences
             nouveau.path = self.config_path
             save_config(nouveau)
             self.cfg = nouveau
             return list(nouveau.warnings)
+
+    def remplacer_rondes(self, sequences: list):
+        """Remplace les rondes partagées ([Sequence] déjà validées) et persiste."""
+        with self.lock:
+            self.cfg.sequences = list(sequences)
+            save_config(self.cfg)

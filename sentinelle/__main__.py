@@ -130,6 +130,14 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("Sentinelle")
+
+    # boutons standard (OK, Annuler…) en français : sans traduction chargée,
+    # Qt les affiche en anglais au milieu d'une interface francophone
+    from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
+    _traducteur = QTranslator(app)
+    if _traducteur.load(QLocale("fr"), "qtbase", "_",
+                        QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(_traducteur)
     # NE PAS quitter tant que seules des boîtes de dialogue de démarrage
     # (avertissement, assistant de premier lancement, page de connexion) sont
     # affichées, AVANT la fenêtre principale. Sinon, sous certains gestionnaires

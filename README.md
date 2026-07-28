@@ -72,7 +72,7 @@ The Configuration window opens on first run.
 
 > **Prefer a package?** Pre-built Linux `.deb` files are attached to every
 > [release](https://github.com/Arcneell/sentinelle/releases):
-> `sudo apt install ./sentinelle_2.1.2_amd64.deb` — this is the supported install
+> `sudo apt install ./sentinelle_<version>_amd64.deb` — this is the supported install
 > path: it pulls `libmpv2`, the Qt/xcb libraries, the VA-API drivers (hard
 > dependencies) and `ffmpeg` (recommended, better failure diagnostics).
 > Plain `dpkg -i` does not resolve dependencies; if you use it, follow up with
@@ -165,7 +165,8 @@ docker compose up -d --build     # builds the API image and starts both containe
 **Security model.** Passwords are hashed with PBKDF2 (never stored or sent in clear)
 with an 8-character minimum; sessions are stateless signed tokens that a password change
 immediately invalidates and that **expire** after `SENTINELLE_TOKEN_TTL_H` hours (default
-168 = 7 days — clients with "Rester connecté" refresh silently before expiry); repeated
+168 = 7 days — clients with "Rester connecté" refresh silently before expiry; accounts with
+the Service role get a non-expiring stream token instead, see below); repeated
 failed logins from one IP are throttled (HTTP 429). Per-user camera access is enforced
 both in the API and at the relay (MediaMTX external HTTP authorization calls back into the
 API for every read, and external publishing to the relay is refused); DVR credentials live
@@ -180,6 +181,61 @@ docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
 ```
 
 `deploy/data/` holds all secrets and is gitignored.
+
+### Third-party stream consumers
+
+Any other program that needs the cameras — a video-analytics service, a recorder — should
+read them **through the relay** instead of dialling the DVRs itself. Each camera then costs
+one connection to its site no matter how many consumers there are, which matters on the 4G
+links, and DVR credentials stay on the server.
+
+Create an account with the **Service** role (Administration → Utilisateurs), tick only the
+cameras it needs, then let it call `GET /api/streams` with its session token:
+
+```bash
+TOKEN=$(curl -s -X POST http://server:8080/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"vision","password":"…"}' | jq -r .token)
+
+curl -s http://server:8080/api/streams -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "relay": { "host": "server", "port": 8554 },
+  "expire_s": 0,
+  "streams": [ { "camera": "cam1", "nom": "Entrée", "site": "s1", "site_nom": "Site 1",
+                 "lien": "4g", "profil": "normal", "ptz": false, "snapshot": true,
+                 "main": "rtsp://vision:<token>@server:8554/cam1-main",
+                 "sub":  "rtsp://vision:<token>@server:8554/cam1-sub" } ] }
+```
+
+The URLs are ready to hand to ffmpeg/OpenCV and carry the relay-scoped token as the RTSP
+password, so **the response is a secret** — do not log it or write it to a world-readable
+config file. Streams are passed through untouched, so `-main` has exactly the resolution the
+DVR main stream had: detection zones drawn against a direct feed stay valid. `snapshot: true`
+means `GET /api/snapshot/<camera>` works, which is handier than a one-frame ffmpeg pull when
+tracing those zones. Motion is available on `GET /api/events` (SSE) if the consumer would
+rather wake up on movement than poll frames.
+
+**The Service role** is what makes this workable unattended. Such an account:
+
+- gets a **stream token that never expires** (`expire_s: 0`). Analytics services run for
+  months without supervision and their RTSP library often treats a 401 as a permanent
+  failure, so an expiring token would blind them silently. Its *API* token still expires
+  normally — leaking one only costs a re-login, not perpetual API access;
+- **never sees everything**: `tout` is forced off, so it reads exactly the sites and cameras
+  you ticked, nothing more;
+- **reaches only the read endpoints** — `/api/streams`, `/api/session`, `/api/snapshot/…`,
+  `/api/events`. Administration, PTZ, loops and even changing its own password answer 403.
+
+Since the stream token has no expiry, revocation is the way to cut it: select the account
+and hit **Déconnecter partout** (or `POST /api/users/<name>/revoke`), which invalidates
+every token it holds immediately. Changing its password does the same. Demoting it out of
+the Service role also kills the perpetual tokens it was issued.
+
+If the relay is reachable at a different address than the API, set `relay_host` in
+`deploy/data/server.yaml` — it must be an address every consumer can use, workstations
+included.
 
 ## Building packages
 

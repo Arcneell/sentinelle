@@ -62,9 +62,60 @@ def attendre_liberations(timeout_s: float = 5.0):
             break
         th.join(restant)
 
+_libx11 = None
+
+
+def _mapper_enfants_x11(wid: int):
+    """Ceinture de sécurité contre le bug d'incrustation de mpv (x11_common) :
+    quand le MapNotify du parent arrive pendant l'initialisation de mpv, mpv le
+    prend pour celui de SA fenêtre enfant et ne la mappe jamais — le flux est
+    décodé mais la tuile reste noire. XMapWindow étant idempotent, on mappe
+    toute fenêtre enfant du wid restée cachée. Sans effet hors X11/XWayland."""
+    global _libx11
+    if sys.platform == "win32":
+        return
+    try:
+        from PySide6.QtGui import QGuiApplication
+        if not QGuiApplication.platformName().lower().startswith("xcb"):
+            return
+        import ctypes
+        if _libx11 is None:
+            x = ctypes.CDLL("libX11.so.6")
+            x.XOpenDisplay.restype = ctypes.c_void_p
+            x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            x.XQueryTree.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong,
+                ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.POINTER(ctypes.c_ulong)),
+                ctypes.POINTER(ctypes.c_uint)]
+            x.XMapWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            x.XFree.argtypes = [ctypes.c_void_p]
+            x.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            d = x.XOpenDisplay(None)
+            if not d:
+                return
+            _libx11 = (x, d)
+        x, d = _libx11
+        racine, parent = ctypes.c_ulong(), ctypes.c_ulong()
+        enfants, n = ctypes.POINTER(ctypes.c_ulong)(), ctypes.c_uint()
+        if not x.XQueryTree(d, wid, ctypes.byref(racine), ctypes.byref(parent),
+                            ctypes.byref(enfants), ctypes.byref(n)):
+            return
+        for i in range(n.value):
+            x.XMapWindow(d, enfants[i])
+        if enfants:
+            x.XFree(enfants)
+        x.XSync(d, 0)
+    except Exception:
+        pass                # le pire cas doit rester « pas de vidéo », pas un crash
+
+
 KIND_LABELS = {
     "timeout": "délai dépassé",
     "network": "site injoignable",
+    # mode serveur uniquement : jeton relais refusé (expiré/révoqué), rafraîchi
+    # par le contrôle de session — l'accès direct DVR ne passe jamais ici
+    "auth": "accès refusé (jeton en cours de rafraîchissement)",
     "other": "erreur de lecture",
 }
 
@@ -201,13 +252,24 @@ class VideoTile(QFrame):
 
         body = QWidget()
         self._stack = QStackedLayout(body)
-        self._stack.setStackingMode(QStackedLayout.StackOne)
+        # StackAll : la surface vidéo reste visible (fenêtre X mappée) EN
+        # PERMANENCE, le texte d'état opaque s'affiche PAR-DESSUS. En mode
+        # StackOne, la fenêtre native de _video n'était mappée qu'au passage
+        # en lecture — or ce MapNotify du parent arrive pendant l'initialisation
+        # de mpv (déclenchée par le même événement file-loaded), et mpv le
+        # confond avec celui de SA fenêtre enfant (x11_common ne filtre pas) :
+        # il ne mappe alors JAMAIS sa fenêtre → flux décodé mais tuile noire.
+        # Parent mappé d'emblée = plus de MapNotify tardif à confondre.
+        # (Diagnostiqué sur mur GLK/XWayland, mpv 0.40 ; voir aussi
+        # _mapper_enfants_x11, la ceinture de sécurité.)
+        self._stack.setStackingMode(QStackedLayout.StackAll)
         self._video = _VideoSurface()
         self._status = QLabel()
         self._status.setAlignment(Qt.AlignCenter)
         self._status.setWordWrap(True)
-        self._stack.addWidget(self._status)   # index 0
-        self._stack.addWidget(self._video)    # index 1
+        self._stack.addWidget(self._status)   # index 0 — couche du dessus
+        self._stack.addWidget(self._video)    # index 1 — toujours visible dessous
+        self._stack.setCurrentIndex(0)        # l'état reste la couche haute
         root.addWidget(body, 1)
 
         # barre de commandes (vue mono) : zoom numérique + PTZ si motorisée
@@ -284,17 +346,19 @@ class VideoTile(QFrame):
     def _flux_text(self) -> str:
         flux = self.camera.flux_pour_vue(self.vue)
         eco = " · éco" if self.camera.profil.startswith("eco") else ""
-        return ("HD" if flux == "main" else "sub") + eco
+        return ("HD" if flux == "main" else "SD") + eco
 
     def _set_state(self, state: TileState, message: str = ""):
         self.state = state
         self._dot.setStyleSheet(
             f"background-color: {_DOT_COLORS[state]}; border-radius: 5px;")
         if state == TileState.PLAYING:
-            self._stack.setCurrentIndex(1)
+            # on cache l'étiquette au lieu de changer de page : la surface
+            # vidéo ne doit jamais être dé-mappée/re-mappée (voir _build_ui)
+            self._status.hide()
         else:
             self._status.setText(message)
-            self._stack.setCurrentIndex(0)
+            self._status.show()
         self.state_changed.emit()
 
     def mouseDoubleClickEvent(self, event):
@@ -527,7 +591,14 @@ class VideoTile(QFrame):
         if player is None:
             self.deleteLater()
             return
-        self._libere.connect(self.deleteLater)
+        self._libere_fait = False
+        self._libere.connect(self._liberation_finie)
+        # chien de garde : si terminate() reste bloqué (flux RTSP figé — cas connu
+        # de ce projet), _libere ne serait jamais émis et le widget + le thread
+        # fuiraient indéfiniment sur un poste 24/7. Passé ce délai, on détruit
+        # quand même la tuile (le thread mpv, démon, mourra au pire à l'arrêt).
+        # La forme à 3 arguments se déconnecte seule si la tuile est déjà détruite.
+        QTimer.singleShot(15000, self, self._liberation_finie)
 
         def work():
             try:
@@ -547,6 +618,14 @@ class VideoTile(QFrame):
         with _liberations_lock:
             _liberations.add(th)
         th.start()
+
+    def _liberation_finie(self):
+        """Détruit la tuile une seule fois, que la libération de mpv ait fini
+        normalement (_libere) ou que le chien de garde ait expiré."""
+        if getattr(self, "_libere_fait", False):
+            return
+        self._libere_fait = True
+        self.deleteLater()
 
     def retry_auth(self):
         """Réarmement MANUEL après correction des identifiants (action utilisateur
@@ -612,6 +691,14 @@ class VideoTile(QFrame):
             return
         self._connect_timer.start()
 
+    def _verifier_apres_lecture(self):
+        """3 s après le début de lecture : sortie vidéo configurée, décodeur
+        stabilisé — moment fiable pour la ceinture de mappage et le diagnostic."""
+        if self.state != TileState.PLAYING or self._player is None:
+            return
+        _mapper_enfants_x11(int(self._video.winId()))
+        self._log_hwdec()
+
     def _log_hwdec(self):
         """Rend visible le mode de décodage réel : le repli VA-API → logiciel de
         mpv est silencieux, et c'est lui qui sature les mini-PC quand le
@@ -632,6 +719,13 @@ class VideoTile(QFrame):
         # appelé depuis le thread mpv — deque est thread-safe pour append
         if level in ("error", "warn", "fatal"):
             self._log_tail.append(f"{component}: {message}")
+            # visibles dans le journal en --verbose : sans cela, la RAISON d'un
+            # échec VA-API (ou de tout repli silencieux de mpv) restait
+            # enfermée dans le tooltip de la tuile
+            if (level != "warn" or "vaapi" in component
+                    or "vaapi" in message.lower() or "hwdec" in message.lower()):
+                logger.debug(f"[{self.camera.id}] mpv {level} "
+                             f"[{component}] {message.strip()}")
 
     def _on_playing(self, gen: int):
         # événement d'une connexion précédente (retry/reconnexion entre-temps) → ignorer
@@ -642,8 +736,14 @@ class VideoTile(QFrame):
         if self._failures > 0:
             logger.info(f"[{self.camera.id}] reconnecté après {self._failures} échec(s)")
         self._failures = 0
-        self._log_hwdec()
         self._set_state(TileState.PLAYING)
+        # file-loaded précède la première trame : la sortie vidéo de mpv n'est
+        # pas encore configurée. On repasse dans 3 s pour (1) mapper sa fenêtre
+        # si le bug d'incrustation l'a laissée cachée et (2) lire le mode de
+        # décodage réellement retenu — lu tout de suite, hwdec-current répond
+        # « no » à tort (faux avertissements « décodage LOGICIEL »).
+        _mapper_enfants_x11(int(self._video.winId()))
+        QTimer.singleShot(3000, self, self._verifier_apres_lecture)
         self._debit_timer.start()
         if self._zoom:
             self._set_zoom(self._zoom)
@@ -687,7 +787,7 @@ class VideoTile(QFrame):
         kind = classify_text(log_text)
 
         if kind == "auth":
-            self._enter_auth_failed(log_text[-200:])
+            self._echec_auth(log_text[-200:])
             return
 
         # logs mpv peu parlants → ffprobe (si présent) tranche en arrière-plan
@@ -722,12 +822,22 @@ class VideoTile(QFrame):
             # un second réessai ni renverser un flux vivant.
             return
         if kind == "auth":
-            self._enter_auth_failed(detail[:200])
+            self._echec_auth(detail[:200])
         elif kind == "ok":
             # le flux répond : l'échec était transitoire
             self._schedule_retry("other")
         else:
             self._schedule_retry(kind if kind in KIND_LABELS else "other")
+
+    def _echec_auth(self, detail: str):
+        """Aiguille un 401 : arrêt définitif en accès DIRECT au DVR (identifiants
+        réels — risque de lockout Hikvision), mais simple réessai en mode SERVEUR
+        (le mot de passe RTSP est un jeton relais : un 401 = jeton expiré/révoqué,
+        rafraîchi par le contrôle de session ; aucun compte DVR n'est sollicité)."""
+        if getattr(self.camera, "remote", None) is not None:
+            self._schedule_retry("auth")
+            return
+        self._enter_auth_failed(detail)
 
     def _enter_auth_failed(self, detail: str):
         logger.error(

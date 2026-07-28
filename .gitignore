@@ -45,9 +45,8 @@ _diag/
 # Configs outils IA locaux (chemins machine, jamais publiés)
 .mcp.json
 .claude/
-.codebuddy/
-.cursor/
-.gemini/
-.qoder/
-.vscode/
-opencode.jsonc
+CLAUDE.md
+
+# Diffs / patchs de travail locaux
+*.diff
+*.patch
