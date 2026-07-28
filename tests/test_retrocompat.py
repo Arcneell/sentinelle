@@ -167,6 +167,66 @@ def test_client_anterieur_ne_degrade_pas_les_comptes(tmp_path):
                      headers={"Authorization": f"Bearer {j['api_mur1']}"}).status_code == 200
 
 
+def test_demarre_meme_si_server_yaml_non_modifiable(tmp_path, monkeypatch):
+    """Une installation existante dont le dossier de données n'est pas
+    accessible en écriture au serveur doit continuer à démarrer.
+
+    Régression 2.4.0 : l'ajout de relay_host a rendu l'écriture de server.yaml
+    nécessaire au démarrage, alors qu'une installation déjà en service ne
+    faisait que le lire. Sur un ./data appartenant à root, le conteneur partait
+    en boucle de redémarrage. Une clé facultative ne doit jamais bloquer le
+    démarrage."""
+    j = _installation_existante(tmp_path)
+    chemin = tmp_path / "server.yaml"
+    avant = chemin.read_text(encoding="utf-8")
+
+    ouvrir = open
+
+    def open_refuse(fichier, mode="r", *a, **kw):
+        if str(fichier) == str(chemin) and "w" in mode:
+            raise PermissionError(13, "Permission denied")
+        return ouvrir(fichier, mode, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", open_refuse)
+
+    with TestClient(_app(tmp_path)) as c:
+        # le serveur répond, et les sessions en cours restent valables
+        assert c.get("/api/health").json()["ok"] is True
+        vue = c.get("/api/config",
+                    headers={"Authorization": f"Bearer {j['api_mur1']}"})
+        assert vue.status_code == 200
+        # relay_host absent du fichier : valeur par défaut appliquée en mémoire
+        assert vue.json()["relay"]["host"] == "testserver"
+
+    assert chemin.read_text(encoding="utf-8") == avant      # rien n'a été écrit
+
+
+def test_nouvelle_installation_non_inscriptible_explique_pourquoi(tmp_path, monkeypatch):
+    """À l'inverse, une installation NEUVE qui ne peut pas persister sa clé de
+    signature doit refuser de démarrer : la clé serait régénérée à chaque
+    redémarrage et déconnecterait tout le parc. Message explicite, pas de
+    trace."""
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(CONFIG_ANCIENNE, allow_unicode=True), encoding="utf-8")
+    ouvrir = open
+
+    def open_refuse(fichier, mode="r", *a, **kw):
+        if str(fichier).endswith("server.yaml") and "w" in mode:
+            raise PermissionError(13, "Permission denied")
+        return ouvrir(fichier, mode, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", open_refuse)
+
+    os.environ["SENTINELLE_DATA"] = str(tmp_path)
+    from sentinelle_server.store import Store
+    try:
+        Store(str(tmp_path))
+    except RuntimeError as e:
+        assert "10001" in str(e) and "écrire" in str(e)
+    else:
+        raise AssertionError("une installation neuve non inscriptible doit échouer")
+
+
 def test_server_yaml_complete_sans_perdre_les_secrets(tmp_path):
     """L'ajout des nouvelles clés à server.yaml ne doit pas régénérer
     secret_key : ce serait invalider toutes les sessions du parc."""
