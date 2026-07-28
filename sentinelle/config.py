@@ -92,7 +92,6 @@ MARQUE_LABELS = {
 MARQUES = tuple(MARQUE_LABELS)               # toutes les marques connues
 MARQUES_URL_LIBRE = ("onvif", "custom")      # pas de gabarit : URLs stockées
 LIENS = ("fibre", "4g")
-ENHANCE_NIVEAUX = ("off", "leger", "sr", "max", "rt")   # amélioration d'image (cf. enhance.py)
 
 
 APP_DIR_WIN = "Sentinelle"
@@ -107,6 +106,16 @@ def app_data_dir() -> str:
         base = os.environ.get("APPDATA", os.path.expanduser("~"))
         return os.path.join(base, APP_DIR_WIN)
     base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    return os.path.join(base, APP_DIR_NIX)
+
+
+def app_state_dir() -> str:
+    """Dossier d'état (journaux) : ~/.local/state/sentinelle sous Linux (spec
+    XDG — un journal qui tourne n'a rien à faire dans ~/.config, qui part dans
+    les sauvegardes/synchros), même dossier que la config sous Windows."""
+    if sys.platform == "win32":
+        return app_data_dir()
+    base = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
     return os.path.join(base, APP_DIR_NIX)
 
 
@@ -144,12 +153,25 @@ def slugify(nom: str) -> str:
 
 
 def mask_url(url: str) -> str:
-    """rtsp://user:pass@host → rtsp://user:***@host (pour logs et UI)."""
-    if "@" in url and "://" in url:
-        scheme, rest = url.split("://", 1)
-        creds, host = rest.rsplit("@", 1)
-        return f"{scheme}://{creds.split(':', 1)[0]}:***@{host}"
-    return url
+    """rtsp://user:pass@host → rtsp://user:***@host (pour logs et UI).
+
+    Passe par urlparse pour isoler l'hôte du reste : un « @ » présent ailleurs
+    que dans les identifiants (dans le chemin/la requête) ne fausse plus l'hôte
+    affiché dans les journaux."""
+    from urllib.parse import urlparse, urlunparse
+    try:
+        p = urlparse(url)
+        if not p.password:
+            return url
+        hote = p.hostname or ""
+        if ":" in hote:                          # IPv6 littéral → crochets
+            hote = f"[{hote}]"
+        # p.port lève ValueError si le port n'est pas numérique : sous le try
+        netloc = hote + (f":{p.port}" if p.port else "")
+    except ValueError:
+        return url
+    netloc = f"{p.username or ''}:***@{netloc}"
+    return urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
 
 
 # ---------------------------------------------------------------- structures
@@ -181,7 +203,6 @@ class Camera:
     reconnexion_preventive_s: int = 0   # 0 = désactivé
     ptz: bool = False             # caméra motorisée (ONVIF)
     onvif_profile: str = ""       # token du profil ONVIF principal (PTZ)
-    amelioration: str = "leger"   # off | leger | sr (super-résolution)
 
     def _auth(self) -> str:
         if not self.user:
@@ -235,8 +256,7 @@ class Camera:
             d.update(hote=self.hote, port=self.port, canal=self.canal,
                      port_http=self.port_http)
         d.update(user=self.user, password=obfusquer(self.password),
-                 photo_intervalle_s=self.photo_intervalle_s,
-                 amelioration=self.amelioration)
+                 photo_intervalle_s=self.photo_intervalle_s)
         if self.reconnexion_preventive_s:
             d["reconnexion_preventive_s"] = self.reconnexion_preventive_s
         if self.ptz:
@@ -259,9 +279,22 @@ class Etape:
 class Sequence:
     nom: str
     etapes: list = field(default_factory=list)   # [Etape]
+    # rondes partagées (mode serveur) : identifiant stable + attribution
+    id: str = ""
+    tous: bool = False                           # attribuée à tous les comptes
+    utilisateurs: list = field(default_factory=list)   # comptes attribués
+    # transitoire côté client : ronde reçue du serveur, non modifiable localement
+    partagee: bool = False
 
     def to_dict(self) -> dict:
-        return {"nom": self.nom, "etapes": [e.to_dict() for e in self.etapes]}
+        d = {"nom": self.nom, "etapes": [e.to_dict() for e in self.etapes]}
+        if self.id:
+            d["id"] = self.id
+        if self.tous:
+            d["tous"] = True
+        if self.utilisateurs:
+            d["utilisateurs"] = list(self.utilisateurs)
+        return d
 
 
 @dataclass
@@ -308,8 +341,17 @@ def load_config(path: str) -> AppConfig:
         logger.info(f"Pas de config existante ({path}) — démarrage vide")
         return cfg
 
-    with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("racine YAML inattendue")
+    except (OSError, yaml.YAMLError, ValueError) as e:
+        # config illisible/corrompue (ex. écriture interrompue par un crash) :
+        # on n'empêche jamais l'ouverture — on repart vide en le signalant.
+        logger.error(f"Config illisible ({path}) : {e} — démarrage vide")
+        cfg.warnings.append(f"Config illisible ({e}) — repartie de zéro")
+        return cfg
 
     options = raw.get("options") or {}
     try:
@@ -325,7 +367,7 @@ def load_config(path: str) -> AppConfig:
                 lien = "fibre"
             cfg.sites.append(Site(id=str(s["id"]), nom=str(s.get("nom") or s["id"]), lien=lien))
         except (KeyError, TypeError) as e:
-            cfg.warnings.append(f"[site ?] entrée invalide ({e}) — skippée")
+            cfg.warnings.append(f"[site ?] entrée invalide ({e}) — ignorée")
 
     ids_vus = set()
     for c in raw.get("cameras") or []:
@@ -369,13 +411,10 @@ def load_config(path: str) -> AppConfig:
                 reconnexion_preventive_s=max(0, int(c.get("reconnexion_preventive_s", 0))),
                 ptz=bool(c.get("ptz", False)),
                 onvif_profile=str(c.get("onvif_profile", "")),
-                amelioration=(str(c.get("amelioration", "leger")).lower()
-                              if str(c.get("amelioration", "leger")).lower() in ENHANCE_NIVEAUX
-                              else "leger"),
             ))
             ids_vus.add(cam_id)
         except (KeyError, ValueError, TypeError) as e:
-            cfg.warnings.append(f"[{nom}] config invalide : {e} — caméra skippée")
+            cfg.warnings.append(f"[{nom}] config invalide : {e} — caméra ignorée")
 
     cam_ids = {c.id for c in cfg.cameras}
     for s in raw.get("sequences") or []:
@@ -395,9 +434,25 @@ def load_config(path: str) -> AppConfig:
                                     duree_s=max(3, int(e.get("duree_s", 30)))))
             if not etapes:
                 raise ValueError("aucune étape valide")
-            cfg.sequences.append(Sequence(nom=str(nom), etapes=etapes))
+            cfg.sequences.append(Sequence(
+                nom=str(nom), etapes=etapes,
+                id=str(s.get("id", "")),
+                tous=bool(s.get("tous", False)),
+                utilisateurs=[str(x) for x in (s.get("utilisateurs") or [])]))
         except (KeyError, ValueError, TypeError) as e:
-            cfg.warnings.append(f"[séquence {nom}] invalide : {e} — skippée")
+            cfg.warnings.append(f"[séquence {nom}] invalide : {e} — ignorée")
+
+    # identifiant stable pour chaque séquence (rondes partagées côté serveur) ;
+    # les fichiers existants n'en ont pas : on en génère un depuis le nom
+    seq_ids = {s.id for s in cfg.sequences if s.id}
+    for s in cfg.sequences:
+        if not s.id:
+            base = slugify(s.nom)
+            cand, i = base, 2
+            while cand in seq_ids:
+                cand, i = f"{base}-{i}", i + 1
+            s.id = cand
+            seq_ids.add(cand)
 
     for w in cfg.warnings:
         logger.warning(w)
@@ -421,5 +476,7 @@ def save_config(cfg: AppConfig):
     with open(tmp, "w", encoding="utf-8") as f:
         f.write("# Sentinelle — fichier géré par l'application (fenêtre Configuration).\n")
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        f.flush()
+        os.fsync(f.fileno())          # forcer l'écriture disque avant le remplacement
     os.replace(tmp, cfg.path)
     logger.info(f"Config enregistrée : {cfg.path}")

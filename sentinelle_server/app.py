@@ -13,9 +13,12 @@ identifiants DVR ne quittent jamais le serveur.
 
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import threading
+import time
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -23,11 +26,42 @@ from fastapi.responses import Response, StreamingResponse
 from sentinelle.snapshot import fetch_snapshot
 
 from . import __version__
+from .auth import MIN_MDP, SCOPE_RELAY
 from .motion import EventHub, MotionMonitor
 from .relay import Relay
 from .store import Store
 
 logger = logging.getLogger(__name__)
+
+# Anti-force-brute du login : au-delà de LOGIN_MAX échecs sur LOGIN_WINDOW_S
+# depuis une même IP, on refuse (429) sans vérifier le mot de passe. Volontaire-
+# ment par IP (et non par compte) pour ne pas permettre de verrouiller à
+# distance le compte d'un mur d'images (déni de service).
+LOGIN_WINDOW_S = 300
+LOGIN_MAX = 8
+
+
+def _ip_interne(ip: str) -> bool:
+    """Adresse privée (RFC 1918) ou loopback — le réseau Docker/LAN de confiance."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return a.is_private or a.is_loopback
+
+
+def _ip_client(request: Request) -> str:
+    """IP d'origine pour la limitation du login.
+
+    X-Forwarded-For n'est pris en compte que si le pair TCP est lui-même sur le
+    réseau interne (cas du reverse proxy Caddy) : sinon un client direct
+    pourrait forger l'en-tête et changer d'« IP » à chaque tentative pour
+    contourner la limitation."""
+    pair = request.client.host if request.client else "?"
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff and _ip_interne(pair):
+        return xff.split(",")[0].strip()
+    return pair
 
 
 def create_app(data_dir: str | None = None) -> FastAPI:
@@ -37,6 +71,8 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     monitor = MotionMonitor(hub.publier)
     ptz_locks: dict[str, threading.Lock] = {}
     ptz_clients: dict[str, object] = {}
+    login_fails: dict[str, list] = {}          # ip -> [horodatages d'échec récents]
+    mdp_fails: dict[str, list] = {}            # ip -> échecs récents de vérif. mdp actuel
 
     from contextlib import asynccontextmanager
 
@@ -56,6 +92,9 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     # ------------------------------------------------------------------- auth
 
     def _token(request: Request) -> str:
+        # jeton en en-tête uniquement (Bearer, ou Basic pour le champ mot de
+        # passe des snapshots) : jamais en paramètre d'URL, qui fuiterait dans
+        # les journaux de proxy, l'historique et l'en-tête Referer.
         auth = request.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             return auth[7:].strip()
@@ -65,12 +104,21 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                 return decode.split(":", 1)[1] if ":" in decode else ""
             except Exception:
                 return ""
-        return request.query_params.get("token", "")
+        return ""
 
-    def user_courant(request: Request):
+    def user_courant(request: Request, service_ok: bool = False):
+        """Compte de la session. Un compte de service est refusé par défaut :
+        il ne doit atteindre que les quelques points de lecture qui le
+        concernent (session, streams, snapshot, événements), jamais
+        l'administration, le PTZ ni son propre mot de passe. La liste blanche
+        est portée par les points eux-mêmes (service_ok=True) : un point ajouté
+        plus tard est donc fermé tant qu'on ne l'a pas ouvert explicitement."""
         u = store.users.user_du_jeton(_token(request))
         if u is None:
             raise HTTPException(401, "session invalide — reconnectez-vous")
+        if u.service and not service_ok:
+            raise HTTPException(403, "compte de service : accès limité à la "
+                                     "lecture des flux (/api/streams)")
         return u
 
     def exiger_admin(request: Request):
@@ -87,6 +135,19 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     @app.post("/api/login")
     async def login(request: Request):
+        ip = _ip_client(request)
+        now = time.time()
+        if len(login_fails) > 512:
+            # purge des IP sans échec récent (sinon croissance sans borne)
+            for k in [k for k, v in login_fails.items()
+                      if not v or now - v[-1] > LOGIN_WINDOW_S]:
+                login_fails.pop(k, None)
+        recents = [t for t in login_fails.get(ip, []) if now - t < LOGIN_WINDOW_S]
+        if len(recents) >= LOGIN_MAX:
+            login_fails[ip] = recents
+            retry = int(LOGIN_WINDOW_S - (now - recents[0]))
+            raise HTTPException(429, f"trop de tentatives — réessayez dans {retry}s",
+                                headers={"Retry-After": str(max(1, retry))})
         try:
             corps = await request.json()
         except Exception:
@@ -94,14 +155,40 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         user = store.users.authentifier(str(corps.get("username", "")),
                                         str(corps.get("password", "")))
         if user is None:
+            recents.append(now)
+            login_fails[ip] = recents
             raise HTTPException(401, "identifiant ou mot de passe incorrect")
+        login_fails.pop(ip, None)              # succès → on repart de zéro pour cette IP
+        # jeton relay livré dès le login : le client peut ainsi rafraîchir le mot
+        # de passe RTSP en même temps que la session (sans re-télécharger /api/config)
         return {"token": store.users.emettre_jeton(user),
+                "relay_token": store.users.emettre_jeton(user, scope=SCOPE_RELAY),
                 "username": user.username, "role": user.role,
                 "version": __version__}
+
+    @app.get("/api/session")
+    def session(request: Request):
+        """État de la session courante (validité restante du jeton), pour le
+        rafraîchissement proactif côté client. reste_s vaut -1 si le jeton
+        n'expire pas."""
+        u = user_courant(request, service_ok=True)
+        return {"ok": True, "username": u.username, "role": u.role,
+                "reste_s": store.users.reste_jeton(_token(request))}
 
     @app.post("/api/account/password")
     async def changer_mon_mdp(request: Request):
         u = user_courant(request)
+        # anti-force-brute du mot de passe ACTUEL : ce point n'exige qu'un jeton
+        # (pas le mot de passe), donc un jeton volé pourrait sinon deviner le
+        # mot de passe réel sans limite. Limité par IP, comme le login.
+        ip = _ip_client(request)
+        now = time.time()
+        recents = [t for t in mdp_fails.get(ip, []) if now - t < LOGIN_WINDOW_S]
+        if len(recents) >= LOGIN_MAX:
+            mdp_fails[ip] = recents
+            retry = int(LOGIN_WINDOW_S - (now - recents[0]))
+            raise HTTPException(429, f"trop de tentatives — réessayez dans {retry}s",
+                                headers={"Retry-After": str(max(1, retry))})
         try:
             corps = await request.json()
         except Exception:
@@ -109,15 +196,41 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         ancien = str(corps.get("ancien", ""))
         nouveau = str(corps.get("nouveau", ""))
         if store.users.authentifier(u.username, ancien) is None:
+            recents.append(now)
+            mdp_fails[ip] = recents
+            if len(mdp_fails) > 512:
+                for k in [k for k, v in mdp_fails.items()
+                          if not v or now - v[-1] > LOGIN_WINDOW_S]:
+                    mdp_fails.pop(k, None)
             raise HTTPException(403, "mot de passe actuel incorrect")
-        if len(nouveau) < 4:
-            raise HTTPException(422, "nouveau mot de passe trop court")
+        mdp_fails.pop(ip, None)
+        if len(nouveau) < MIN_MDP:
+            raise HTTPException(422, f"nouveau mot de passe trop court (min {MIN_MDP})")
         store.users.definir_mot_de_passe(u.username, nouveau)
-        # le jeton signé dépend de l'empreinte du mdp → renouveler la session
+        # le jeton signé dépend de l'empreinte du mdp → renouveler la session ET
+        # le jeton relay (sinon le mot de passe RTSP déjà distribué devient
+        # invalide et toutes les tuiles vidéo tombent en 401 silencieusement)
         u2 = store.users.users[u.username]
-        return {"ok": True, "token": store.users.emettre_jeton(u2)}
+        return {"ok": True, "token": store.users.emettre_jeton(u2),
+                "relay_token": store.users.emettre_jeton(u2, scope=SCOPE_RELAY)}
+
+    @app.post("/api/account/logout")
+    def logout(request: Request):
+        """Révoque toutes les sessions du compte courant (déconnexion de tous
+        les appareils). Le jeton présenté devient immédiatement invalide."""
+        u = user_courant(request)
+        store.users.revoquer_sessions(u.username)
+        return {"ok": True}
 
     # ----------------------------------------------------------- configuration
+
+    def _relay_hote(request: Request) -> str:
+        """Hôte du relais annoncé aux clients : la valeur explicite de
+        server.yaml si elle est renseignée, sinon l'hôte par lequel le client a
+        joint l'API — ce qui est le cas normal, API et relais partageant la même
+        machine."""
+        hote = str(store.params.get("relay_host") or "").strip()
+        return hote or (request.url.hostname or "localhost")
 
     def _boucles_utilisateur(u, visibles: set) -> list[dict]:
         """Boucles personnelles du compte, épurées des caméras devenues
@@ -135,6 +248,46 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                 resultat.append({"nom": s.get("nom", ""), "etapes": etapes})
         return resultat
 
+    def _rondes_partagees(u, visibles: set) -> list[dict]:
+        """Rondes partagées attribuées au compte, épurées des caméras non
+        visibles (mêmes règles que les boucles personnelles). Une ronde vidée
+        de toutes ses étapes n'est pas renvoyée."""
+        resultat = []
+        for s in store.cfg.sequences:
+            if not (s.tous or u.username in s.utilisateurs):
+                continue
+            etapes = []
+            for e in s.etapes:
+                cams = [c for c in e.cameras if c in visibles]
+                if cams:
+                    etapes.append({"mode": e.mode, "cameras": cams,
+                                   "duree_s": e.duree_s})
+            if etapes:
+                resultat.append({"id": s.id, "nom": s.nom, "etapes": etapes,
+                                 "partagee": True})
+        return resultat
+
+    def _valider_etapes(brut, cams_autorisees: set) -> list[dict]:
+        """Épure une liste d'étapes reçue : modes connus, caméras autorisées,
+        durées bornées. Les étapes sans caméra valide sont éliminées."""
+        etapes = []
+        for e in (brut or [])[:100]:
+            mode = str(e.get("mode", "grille"))
+            if mode not in ("grille", "mono"):
+                continue
+            cams = [str(c) for c in (e.get("cameras") or [])
+                    if str(c) in cams_autorisees]
+            if mode == "mono":
+                cams = cams[:1]
+            if not cams:
+                continue
+            try:
+                duree = max(3, min(3600, int(e.get("duree_s", 30))))
+            except (TypeError, ValueError):
+                duree = 30
+            etapes.append({"mode": mode, "cameras": cams[:16], "duree_s": duree})
+        return etapes
+
     @app.get("/api/config")
     def config_vue(request: Request):
         """Projection pour l'affichage : caméras autorisées, sans identifiant DVR."""
@@ -147,7 +300,12 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             "version": __version__,
             "compte": {"username": u.username, "role": u.role},
             "rotation_duree_s": cfg.rotation_duree_s,
-            "relay": {"port": int(store.params["relay_port"])},
+            # jeton de portée « relay » : sert UNIQUEMENT de mot de passe RTSP.
+            # Distinct du jeton de session (Bearer) pour que sa capture par
+            # écoute du flux non chiffré ne donne aucun accès à l'API HTTP.
+            "relay": {"host": _relay_hote(request),
+                      "port": int(store.params["relay_port"]),
+                      "token": store.users.emettre_jeton(u, scope=SCOPE_RELAY)},
             "sites": [{"id": s.id, "nom": s.nom, "lien": s.lien}
                       for s in cfg.sites if s.id in sites_utiles],
             "cameras": [{
@@ -157,8 +315,55 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                 "snapshot": bool(c.snapshot_url()),
                 "main": f"{c.id}-main", "sub": f"{c.id}-sub",
             } for c in cams],
-            "sequences": _boucles_utilisateur(u, visibles),
+            "sequences": (_rondes_partagees(u, visibles)
+                          + _boucles_utilisateur(u, visibles)),
         }
+
+    @app.get("/api/streams")
+    def streams(request: Request):
+        """URLs RTSP prêtes à l'emploi des caméras autorisées.
+
+        Destiné aux consommateurs machine (analyse vidéo type Fuel Watch) qui
+        doivent lire les flux sans connaître les identifiants DVR ni la
+        convention de nommage des chemins du relais. Ils passent ainsi par le
+        relais comme les murs d'images : une seule connexion vers chaque site,
+        quel que soit le nombre de consommateurs.
+
+        Le jeton relay est incrusté dans les URLs : la réponse est un SECRET, à
+        ne pas journaliser ni écrire dans un fichier de configuration lisible.
+        `expire_s` donne la durée de validité — rappeler ce point (ou se
+        reconnecter) avant l'échéance, sinon le relais répondra 401. Un compte
+        de rôle « service » reçoit 0 : son jeton relay n'expire pas, et seule
+        une révocation (ou un changement de mot de passe) le coupe.
+        """
+        u = user_courant(request, service_ok=True)
+        hote = _relay_hote(request)
+        port = int(store.params["relay_port"])
+        jeton = store.users.emettre_jeton(u, scope=SCOPE_RELAY)
+        base = (f"rtsp://{quote(u.username, safe='')}:"
+                f"{quote(jeton, safe='')}@{hote}:{port}/")
+        visibles = store.users.cameras_visibles(u, store.cfg)
+        flux = []
+        for c in store.cfg.cameras:
+            if c.id not in visibles:
+                continue
+            entree = {"camera": c.id, "nom": c.nom,
+                      "site": c.site.id, "site_nom": c.site.nom,
+                      "lien": c.site.lien, "profil": c.profil,
+                      "ptz": bool(c.ptz),
+                      # le snapshot passe par l'API (jeton de session en Basic),
+                      # pas par le relais : utile pour tracer des zones
+                      "snapshot": bool(c.snapshot_url())}
+            # un chemin n'existe sur le relais que si la caméra sait fournir ce
+            # flux (voir Relay.sync) : sinon on renvoie une chaîne vide plutôt
+            # qu'une URL qui échouerait à l'ouverture
+            for vue in ("main", "sub"):
+                entree[vue] = f"{base}{c.id}-{vue}" if c.url(vue) else ""
+            flux.append(entree)
+        return {"version": __version__,
+                "relay": {"host": hote, "port": port},
+                "expire_s": store.users.duree_jeton(u, SCOPE_RELAY),
+                "streams": flux}
 
     @app.put("/api/account/sequences")
     async def mes_boucles(request: Request):
@@ -175,25 +380,65 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         valides = []
         for s in brut[:50]:                              # borne raisonnable
             nom = str(s.get("nom", "")).strip()[:80]
-            etapes = []
-            for e in (s.get("etapes") or [])[:100]:
-                mode = str(e.get("mode", "grille"))
-                if mode not in ("grille", "mono"):
-                    continue
-                cams = [str(c) for c in (e.get("cameras") or []) if str(c) in visibles]
-                if mode == "mono":
-                    cams = cams[:1]
-                if not cams:
-                    continue
-                try:
-                    duree = max(3, min(3600, int(e.get("duree_s", 30))))
-                except (TypeError, ValueError):
-                    duree = 30
-                etapes.append({"mode": mode, "cameras": cams[:16], "duree_s": duree})
+            etapes = _valider_etapes(s.get("etapes"), visibles)
             if nom and etapes:
                 valides.append({"nom": nom, "etapes": etapes})
         store.users.definir_sequences(u.username, valides)
         return {"ok": True, "sequences": len(valides)}
+
+    # ------------------------------------------------------- rondes partagées
+
+    @app.get("/api/rounds")
+    def rondes_liste(request: Request):
+        """Rondes partagées complètes, avec leur attribution (administration)."""
+        exiger_admin(request)
+        return {"sequences": [{
+            "id": s.id, "nom": s.nom,
+            "etapes": [e.to_dict() for e in s.etapes],
+            "tous": s.tous, "utilisateurs": list(s.utilisateurs),
+        } for s in store.cfg.sequences]}
+
+    @app.put("/api/rounds")
+    async def rondes_remplacer(request: Request):
+        """Remplace les rondes partagées et leur attribution (administration)."""
+        exiger_admin(request)
+        try:
+            corps = await request.json()
+        except Exception:
+            raise HTTPException(400, "corps JSON invalide")
+        brut = corps.get("sequences") if isinstance(corps, dict) else None
+        if not isinstance(brut, list):
+            raise HTTPException(400, "liste de rondes attendue")
+
+        from sentinelle.config import Etape, Sequence, slugify
+        cam_ids = {c.id for c in store.cfg.cameras}
+        comptes = set(store.users.users)
+        warnings, valides, ids_pris = [], [], set()
+        for s in brut[:50]:
+            nom = str(s.get("nom", "")).strip()[:80]
+            etapes = _valider_etapes(s.get("etapes"), cam_ids)
+            if not nom or not etapes:
+                warnings.append(f"ronde '{nom or '?'}' sans étape valide — ignorée")
+                continue
+            inconnus = [str(x) for x in (s.get("utilisateurs") or [])
+                        if str(x) not in comptes]
+            if inconnus:
+                warnings.append(f"ronde '{nom}' : compte(s) inconnu(s) "
+                                f"{', '.join(inconnus[:5])} — retiré(s)")
+            ident = str(s.get("id", "")).strip() or slugify(nom)
+            cand, i = ident, 2
+            while cand in ids_pris:
+                cand, i = f"{ident}-{i}", i + 1
+            ids_pris.add(cand)
+            valides.append(Sequence(
+                nom=nom, id=cand,
+                etapes=[Etape(**e) for e in etapes],
+                tous=bool(s.get("tous", False)),
+                utilisateurs=[str(x) for x in (s.get("utilisateurs") or [])
+                              if str(x) in comptes]))
+        store.remplacer_rondes(valides)
+        logger.info(f"Rondes partagées mises à jour ({len(valides)})")
+        return {"ok": True, "sequences": len(valides), "warnings": warnings}
 
     @app.get("/api/config/full")
     def config_complete(request: Request):
@@ -225,6 +470,10 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             warnings = store.remplacer_config(data)
         except Exception as e:
             raise HTTPException(422, f"configuration rejetée : {e}")
+        # les clients ONVIF (PTZ) sont mis en cache par caméra avec l'hôte et les
+        # identifiants du moment : on les jette pour que la nouvelle config (IP ou
+        # mot de passe modifiés) reprenne effet sans redémarrer le serveur.
+        ptz_clients.clear()
         relay.sync_fond(store)
         monitor.surveiller(store.cfg.cameras)
         logger.info(f"Configuration remplacée ({len(store.cfg.cameras)} caméras)")
@@ -254,10 +503,20 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         logger.info(f"Utilisateurs mis à jour ({len(store.users.users)} comptes)")
         return {"ok": True, "warnings": warnings}
 
+    @app.post("/api/users/{username}/revoke")
+    async def users_revoquer(username: str, request: Request):
+        """Invalide immédiatement toutes les sessions d'un compte (poste volé,
+        jeton exfiltré) sans changer son mot de passe (administration)."""
+        exiger_admin(request)
+        if not store.users.revoquer_sessions(username):
+            raise HTTPException(404, "compte inconnu")
+        logger.info(f"Sessions révoquées pour '{username}'")
+        return {"ok": True}
+
     # ---------------------------------------------------------------- médias
 
-    def _cam_autorisee(request: Request, cam_id: str):
-        u = user_courant(request)
+    def _cam_autorisee(request: Request, cam_id: str, service_ok: bool = False):
+        u = user_courant(request, service_ok=service_ok)
         cam = store.cfg.camera(cam_id)
         if cam is None or not u.peut_voir(cam):
             raise HTTPException(404, "caméra inconnue ou non autorisée")
@@ -265,7 +524,9 @@ def create_app(data_dir: str | None = None) -> FastAPI:
 
     @app.get("/api/snapshot/{cam_id}")
     def snapshot(cam_id: str, request: Request):
-        cam = _cam_autorisee(request, cam_id)
+        # ouvert aux comptes de service : tracer des zones de détection sur une
+        # image fraîche évite un tirage RTSP d'une seule frame
+        cam = _cam_autorisee(request, cam_id, service_ok=True)
         url = cam.snapshot_url()
         if not url:
             raise HTTPException(404, "pas de snapshot pour cette caméra")
@@ -286,10 +547,19 @@ def create_app(data_dir: str | None = None) -> FastAPI:
         except Exception:
             raise HTTPException(400, "requête invalide")
         action = corps.get("action", "")
+        if action == "publish":
+            # Aucune publication légitime n'existe : les chemins du relais sont
+            # alimentés par une source RTSP tirée à la demande depuis les DVR
+            # (source + sourceOnDemand côté MediaMTX), jamais par un client qui publie. On
+            # refuse donc TOUTE publication — y compris depuis le LAN — pour
+            # empêcher qu'un équipement interne compromis injecte une fausse
+            # caméra dans le mur d'images des opérateurs.
+            raise HTTPException(403, "publication non autorisée")
         if action not in ("read", "playback"):
-            # publish (source à la demande) et le reste : géré en interne
+            # api/metrics : déjà exclu côté MediaMTX ; on tolère (appels internes).
             return {"ok": True}
-        user = store.users.user_du_jeton(str(corps.get("password", "")))
+        user = store.users.user_du_jeton(str(corps.get("password", "")),
+                                         scope=SCOPE_RELAY)
         if user is None:
             raise HTTPException(401, "jeton invalide")
         chemin = str(corps.get("path", ""))
@@ -356,9 +626,20 @@ def create_app(data_dir: str | None = None) -> FastAPI:
     @app.get("/api/events")
     async def events(request: Request):
         """Flux SSE des mouvements, limité aux caméras autorisées de l'utilisateur."""
-        u = user_courant(request)
+        # ouvert aux comptes de service : une analyse vidéo peut ne se réveiller
+        # que sur mouvement au lieu d'échantillonner en continu
+        u = user_courant(request, service_ok=True)
+        token = _token(request)
         visibles = store.users.cameras_visibles(u, store.cfg)
         q = hub.abonner()
+
+        def _revalider() -> set | None:
+            """Recalcule les caméras visibles depuis l'état courant (droits ou
+            jeton ont pu changer pendant la diffusion). None = session finie."""
+            u2 = store.users.user_du_jeton(token)
+            if u2 is None:
+                return None
+            return store.users.cameras_visibles(u2, store.cfg)
 
         async def gen():
             try:
@@ -370,9 +651,14 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                         return
                     try:
                         evt = await asyncio.wait_for(q.get(), timeout=15)
-                        if evt.get("camera") in visibles:
+                        vis = _revalider()
+                        if vis is None:
+                            return                    # droits révoqués / jeton expiré
+                        if evt.get("camera") in vis:
                             yield f"data: {json.dumps(evt)}\n\n"
                     except asyncio.TimeoutError:
+                        if _revalider() is None:
+                            return
                         yield ": keepalive\n\n"
             finally:
                 hub.desabonner(q)

@@ -24,7 +24,20 @@ import requests
 
 WSD_ADDR = "239.255.255.250"
 WSD_PORT = 3702
-SOAP_TIMEOUT = 6
+
+
+def _soap_timeout() -> int:
+    """Délai des appels ONVIF, en secondes. Surchargé par
+    SENTINELLE_ONVIF_TIMEOUT : sur un site 4G à forte latence ou un DVR qui
+    redémarre, 6 s peut être trop court et faire échouer PTZ/détection en
+    boucle plutôt qu'attendre un appareil momentanément lent."""
+    try:
+        return max(2, int(os.environ.get("SENTINELLE_ONVIF_TIMEOUT", "6")))
+    except (TypeError, ValueError):
+        return 6
+
+
+SOAP_TIMEOUT = _soap_timeout()
 
 _NS_DEVICE = "http://www.onvif.org/ver10/device/wsdl"
 _NS_MEDIA = "http://www.onvif.org/ver10/media/wsdl"
@@ -53,7 +66,7 @@ def _findall(elem, name: str):
 
 @dataclass
 class OnvifDevice:
-    xaddr: str                       # URL du service device (ex. http://10.0.0.5/onvif/device_service)
+    xaddr: str                       # URL du service device (ex. http://192.0.2.5/onvif/device_service)
     types: str = ""
     scopes: str = ""
 
@@ -120,7 +133,12 @@ def discover(timeout: float = 4.0) -> list[OnvifDevice]:
             except socket.timeout:
                 continue
             except OSError:
-                break
+                # ex. Windows : une caméra qui ne répond pas au probe multicast
+                # provoque un ICMP Port Unreachable, remonté ici en
+                # WSAECONNRESET. Ne PAS arrêter la découverte pour autant — les
+                # autres appareils répondent encore ; on ignore ce paquet et on
+                # continue jusqu'à l'expiration du délai.
+                continue
             dev = _parse_probe_match(data)
             if dev and dev.xaddr and dev.xaddr not in trouves:
                 trouves[dev.xaddr] = dev
@@ -387,6 +405,19 @@ class OnvifCamera:
                 return adr.text.strip()
         adr = _find(root, "Address")
         return (adr.text or "").strip() if adr is not None else self._events_url
+
+    def desabonner_mouvement(self, endpoint: str):
+        """Termine explicitement un abonnement PullPoint (WS-BaseNotification
+        Unsubscribe). Best-effort : sans cela l'abonnement n'expire qu'au bout de
+        son InitialTerminationTime, et les renouvellements successifs peuvent
+        empiler des abonnements sur un DVR à quota de sessions limité."""
+        if not endpoint:
+            return
+        body = '<Unsubscribe xmlns="http://docs.oasis-open.org/wsn/b-2"/>'
+        try:
+            self._call(endpoint, body)
+        except Exception:
+            pass
 
     def tirer_mouvement(self, endpoint: str, timeout: str = "PT5S",
                         limite: int = 20) -> list:

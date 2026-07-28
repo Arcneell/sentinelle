@@ -59,7 +59,8 @@ See [Server](#central-server) below for deployment.
 Requires **Python 3.11+** and **libmpv**.
 
 - Windows: put `libmpv-2.dll` in a `lib/` folder at the project root.
-- Debian/Ubuntu: `sudo apt install libmpv2` — Fedora: `sudo dnf install mpv-libs`.
+- Debian/Ubuntu: `sudo apt install libmpv2 libxcb-cursor0 va-driver-all` — Fedora: `sudo dnf install mpv-libs xcb-util-cursor libva-utils`.
+  (`libxcb-cursor0` is needed by Qt's X11 backend, used for video embedding — including under Wayland via XWayland; `va-driver-all` enables **hardware video decoding** (VA-API), which is what lets low-power mini-PCs run many streams without saturating the CPU.)
 - Optional: `ffprobe` (from `ffmpeg`) improves failure diagnostics.
 
 ```bash
@@ -71,7 +72,11 @@ The Configuration window opens on first run.
 
 > **Prefer a package?** Pre-built Linux `.deb` files are attached to every
 > [release](https://github.com/Arcneell/sentinelle/releases):
-> `sudo apt install ./sentinelle_2.0.1_amd64.deb` (pulls `libmpv2` automatically).
+> `sudo apt install ./sentinelle_<version>_amd64.deb` — this is the supported install
+> path: it pulls `libmpv2`, the Qt/xcb libraries, the VA-API drivers (hard
+> dependencies) and `ffmpeg` (recommended, better failure diagnostics).
+> Plain `dpkg -i` does not resolve dependencies; if you use it, follow up with
+> `apt -f install`.
 
 ## Configuration
 
@@ -108,8 +113,10 @@ and an off-screen camera holds no connection.
 | Extreme eco | JPEG snapshot every N seconds  | substream        |
 
 Rotation and loops close the current streams before opening the next. RTSP runs over TCP.
-Substreams are rendered with mpv's `ewa_lanczossharp` scaler so they stay readable when
-enlarged — no extra processing, no external dependencies.
+Rendering favours **robustness over sharpness**: on Linux, video is decoded in **hardware**
+(VA-API) and rendered in software (no OpenGL) — this runs on any hardware, including the
+low-power fanless mini-PCs used as video walls, whose GPU drivers often crash mpv's OpenGL
+path. Set `SENTINELLE_MPV_VO` / `SENTINELLE_MPV_HWDEC` to override per machine.
 
 ### Device support
 
@@ -151,16 +158,88 @@ docker compose up -d --build     # builds the API image and starts both containe
 - **Ports**: `8080/tcp` (API — login, config, snapshots, PTZ, motion over SSE, relay
   auth) and `8554/tcp` (RTSP relay). The MediaMTX control port stays inside the Docker
   network.
+- **Data directory ownership**: the API runs unprivileged (UID/GID 10001), so `deploy/data/`
+  *and everything in it* must be writable by that UID — `sudo chown -R 10001:10001 data`. A
+  file dropped there by root (manual bootstrap, older install) stays read-only to the server;
+  it starts anyway and says so in the log, but cannot save settings.
 - **Update**: `git pull && docker compose up -d --build`. After editing
   `deploy/mediamtx.yml`, recreate the relay so it reloads: `docker compose up -d
   --force-recreate mediamtx`.
 
-**Security model.** Passwords are hashed with PBKDF2 (never stored or sent in clear);
-sessions are stateless signed tokens that a password change immediately invalidates;
-per-user camera access is enforced both in the API and at the relay (MediaMTX external
-HTTP authorization calls back into the API for every read); DVR credentials live only on
-the server. The API speaks plain HTTP — deploy it on a trusted network (VPN) or behind a
-TLS reverse proxy (Caddy / nginx). `deploy/data/` holds all secrets and is gitignored.
+**Security model.** Passwords are hashed with PBKDF2 (never stored or sent in clear)
+with an 8-character minimum; sessions are stateless signed tokens that a password change
+immediately invalidates and that **expire** after `SENTINELLE_TOKEN_TTL_H` hours (default
+168 = 7 days — clients with "Rester connecté" refresh silently before expiry; accounts with
+the Service role get a non-expiring stream token instead, see below); repeated
+failed logins from one IP are throttled (HTTP 429). Per-user camera access is enforced
+both in the API and at the relay (MediaMTX external HTTP authorization calls back into the
+API for every read, and external publishing to the relay is refused); DVR credentials live
+only on the server.
+
+The API speaks plain HTTP — deploy it on a trusted network (VPN), or terminate TLS with the
+bundled Caddy overlay:
+
+```bash
+export SENTINELLE_DOMAIN=sentinelle.example.org   # or use `tls internal` — see deploy/Caddyfile
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+```
+
+`deploy/data/` holds all secrets and is gitignored.
+
+### Third-party stream consumers
+
+Any other program that needs the cameras — a video-analytics service, a recorder — should
+read them **through the relay** instead of dialling the DVRs itself. Each camera then costs
+one connection to its site no matter how many consumers there are, which matters on the 4G
+links, and DVR credentials stay on the server.
+
+Create an account with the **Service** role (Administration → Utilisateurs), tick only the
+cameras it needs, then let it call `GET /api/streams` with its session token:
+
+```bash
+TOKEN=$(curl -s -X POST http://server:8080/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"vision","password":"…"}' | jq -r .token)
+
+curl -s http://server:8080/api/streams -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "relay": { "host": "server", "port": 8554 },
+  "expire_s": 0,
+  "streams": [ { "camera": "cam1", "nom": "Entrée", "site": "s1", "site_nom": "Site 1",
+                 "lien": "4g", "profil": "normal", "ptz": false, "snapshot": true,
+                 "main": "rtsp://vision:<token>@server:8554/cam1-main",
+                 "sub":  "rtsp://vision:<token>@server:8554/cam1-sub" } ] }
+```
+
+The URLs are ready to hand to ffmpeg/OpenCV and carry the relay-scoped token as the RTSP
+password, so **the response is a secret** — do not log it or write it to a world-readable
+config file. Streams are passed through untouched, so `-main` has exactly the resolution the
+DVR main stream had: detection zones drawn against a direct feed stay valid. `snapshot: true`
+means `GET /api/snapshot/<camera>` works, which is handier than a one-frame ffmpeg pull when
+tracing those zones. Motion is available on `GET /api/events` (SSE) if the consumer would
+rather wake up on movement than poll frames.
+
+**The Service role** is what makes this workable unattended. Such an account:
+
+- gets a **stream token that never expires** (`expire_s: 0`). Analytics services run for
+  months without supervision and their RTSP library often treats a 401 as a permanent
+  failure, so an expiring token would blind them silently. Its *API* token still expires
+  normally — leaking one only costs a re-login, not perpetual API access;
+- **never sees everything**: `tout` is forced off, so it reads exactly the sites and cameras
+  you ticked, nothing more;
+- **reaches only the read endpoints** — `/api/streams`, `/api/session`, `/api/snapshot/…`,
+  `/api/events`. Administration, PTZ, loops and even changing its own password answer 403.
+
+Since the stream token has no expiry, revocation is the way to cut it: select the account
+and hit **Déconnecter partout** (or `POST /api/users/<name>/revoke`), which invalidates
+every token it holds immediately. Changing its password does the same. Demoting it out of
+the Service role also kills the perpetual tokens it was issued.
+
+If the relay is reachable at a different address than the API, set `relay_host` in
+`deploy/data/server.yaml` — it must be an address every consumer can use, workstations
+included.
 
 ## Building packages
 
@@ -169,21 +248,27 @@ Pre-built Linux packages are attached to each
 
 ```bash
 # Linux .deb (works from Windows too, via Docker) -> dist/sentinelle_<version>_amd64.deb
-docker run --rm -v "${PWD}:/src" -w /src debian:12 bash packaging/build_deb.sh
+# Build on the SAME Debian release as the target machines (Debian 13/trixie).
+docker run --rm -v "${PWD}:/src" -w /src debian:13 bash packaging/build_deb.sh
 ```
 
 ```powershell
-# Windows executable (PyInstaller)
-pip install pyinstaller
-pyinstaller --noconfirm --windowed --name Sentinelle --icon packaging/sentinelle.ico `
-    --add-binary "lib\libmpv-2.dll;." `
-    --add-data "sentinelle\ui\sentinelle.ico;sentinelle/ui" `
-    --add-data "sentinelle\ui\sentinelle.png;sentinelle/ui" run.py
+# Windows executable (PyInstaller) — builds dist/Sentinelle/Sentinelle.exe
+pwsh packaging/build_windows.ps1
 ```
 
+The script signs the executable when a code-signing certificate is provided
+(`$env:SENTINELLE_PFX` / `$env:SENTINELLE_PFX_PW`) — **recommended**, as unsigned builds are
+routinely blocked by endpoint protection (Symantec Endpoint Protection & co.). Without a
+certificate it still builds, unsigned.
+
 Installed `.deb`: launch **Sentinelle** from the applications menu or the `sentinelle`
-command (Debian 12+ / Ubuntu 24.04+). Under Wayland, if tiles stay black:
-`QT_QPA_PLATFORM=xcb sentinelle`.
+command (Debian 13 / Ubuntu 24.04+). On a Wayland session (GNOME's default) the app
+automatically requests XWayland (`QT_QPA_PLATFORM=xcb;wayland`, i.e. xcb with a wayland
+fallback) so video renders — set that variable yourself only to override the
+auto-detection. If it ends up on native Wayland (video unavailable), the app now says so
+at startup. If the GPU driver makes video crash the machine, right-click the launcher
+icon and pick **Safe video mode**, or run `sentinelle --safe-video`.
 
 ## Architecture
 
@@ -194,7 +279,7 @@ sentinelle/                  Desktop client (PySide6 / Qt 6)
 ├── snapshot.py              JPEG snapshots (ISAPI/CGI) and Hikvision channel discovery
 ├── onvif.py                 ONVIF: WS-Discovery, stream/snapshot URIs, PTZ, motion events
 ├── motion.py                ONVIF motion monitor (per-camera event subscription threads)
-├── player.py                libmpv loading, RTSP settings, upscaling
+├── player.py                libmpv loading, RTSP settings, VA-API HW decode
 ├── remote.py                Server mode: API client, session login, SSE motion listener
 └── ui/                      Title bar, sidebar, grid/single views, tiles, dialogs, theme
 sentinelle_server/           Server (no Qt dependency)

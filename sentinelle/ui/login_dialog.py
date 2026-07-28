@@ -5,8 +5,9 @@ d'action pleine largeur. Entrée valide le formulaire ; l'erreur s'affiche sous
 les champs sans fermer la fenêtre.
 """
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+import threading
+
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout)
 
@@ -17,6 +18,8 @@ from .theme import t
 class LoginDialog(QDialog):
     """Ouvre une session sur le serveur. `self.remote` porte la session en cas
     de succès ; `infos()` donne l'URL/identifiants saisis."""
+
+    _login_done = Signal(object, str)           # ServeurDistant|None, erreur
 
     def __init__(self, url: str, username: str = "", parent=None,
                  url_editable: bool = False):
@@ -127,13 +130,15 @@ class LoginDialog(QDialog):
         lay.addLayout(ligne_srv)
 
         (self._pwd if username else self._user).setFocus()
+        self._login_done.connect(self._on_login_done)
 
     def _afficher_erreur(self, texte: str):
         self._erreur.setText(texte)
         self._erreur.setVisible(bool(texte))
 
     def _tenter(self):
-        from ..remote import ErreurServeur, ServeurDistant
+        if not self._btn.isEnabled():
+            return                              # tentative déjà en cours (Entrée répétée)
         url = self._url.text().strip()
         user = self._user.text().strip()
         if not url:
@@ -144,12 +149,29 @@ class LoginDialog(QDialog):
             return
         self._btn.setEnabled(False)
         self._btn.setText("Connexion…")
-        self.repaint()
-        srv = ServeurDistant(url)
-        try:
-            srv.login(user, self._pwd.text())
-        except ErreurServeur as e:
-            self._afficher_erreur(str(e))
+        self._afficher_erreur("")
+        pwd = self._pwd.text()
+
+        # requête réseau hors du thread UI : sinon un serveur lent/injoignable
+        # gèle la fenêtre (jusqu'au délai d'attente TCP)
+        def work():
+            from ..remote import ErreurServeur, ServeurDistant
+            srv = ServeurDistant(url)
+            try:
+                srv.login(user, pwd)
+            except ErreurServeur as e:
+                srv, err = None, str(e)
+            else:
+                err = ""
+            try:
+                self._login_done.emit(srv, err)
+            except RuntimeError:
+                pass                            # fenêtre détruite entre-temps
+        threading.Thread(target=work, daemon=True, name="login").start()
+
+    def _on_login_done(self, srv, erreur: str):
+        if srv is None:
+            self._afficher_erreur(erreur)
             self._btn.setEnabled(True)
             self._btn.setText("Se connecter")
             return

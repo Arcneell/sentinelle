@@ -1,0 +1,26 @@
+# Reverse proxy TLS optionnel pour l'API Sentinelle.
+#
+# Termine le HTTPS devant l'API (port 8080, en clair sur le réseau Docker
+# interne) : les identifiants de connexion et les jetons ne circulent plus en
+# clair sur le réseau. À activer avec docker-compose.tls.yml.
+#
+# Renseignez le domaine via la variable d'environnement SENTINELLE_DOMAIN
+# (ex. sentinelle.mon-domaine.fr). Caddy obtient et renouvelle seul le
+# certificat Let's Encrypt si le domaine est public et joignable en 80/443.
+#
+# Réseau purement interne / VPN sans domaine public ? Remplacez la ligne du
+# domaine par l'adresse et utilisez `tls internal` (Caddy génère une autorité
+# locale) :
+#
+#     https://192.0.2.10 {
+#         tls internal
+#         reverse_proxy api:8080
+#     }
+#
+# NB : le flux RTSP (port 8554) n'est PAS couvert ici. Pour le chiffrer aussi,
+# activez le RTSPS dans mediamtx.yml (encryption + certificats) — sinon,
+# gardez le relais sur un réseau de confiance (VPN).
+
+{$SENTINELLE_DOMAIN} {
+	reverse_proxy api:8080
+}

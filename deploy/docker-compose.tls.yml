@@ -1,0 +1,37 @@
+# Surcouche TLS optionnelle : ajoute un reverse proxy Caddy (HTTPS) devant l'API.
+#
+# Usage :
+#   export SENTINELLE_DOMAIN=sentinelle.mon-domaine.fr
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# L'API n'a alors plus besoin d'être exposée directement : Caddy publie 80/443
+# et relaie vers l'API sur le réseau Docker interne. Les postes se connectent
+# à https://<domaine> ; le relais RTSP reste sur 8554 (voir Caddyfile).
+#
+# Requiert Docker Compose v2.24+ (tag !reset). Sur une version plus ancienne,
+# retirez le bloc `ports: !reset []` ci-dessous (l'API restera aussi exposée en
+# clair sur 8080).
+
+services:
+  api:
+    # ne plus publier l'API en clair : elle n'est jointe que par Caddy (interne)
+    ports: !reset []
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - SENTINELLE_DOMAIN=${SENTINELLE_DOMAIN:?définissez SENTINELLE_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+volumes:
+  caddy_data:
+  caddy_config:

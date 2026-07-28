@@ -1,4 +1,4 @@
-fastapi>=0.110
-uvicorn>=0.29
-PyYAML>=6.0
-requests>=2.31
+fastapi>=0.140.1,<1
+uvicorn>=0.51.0,<1
+PyYAML>=6.0.3,<7
+requests>=2.34.2,<3
