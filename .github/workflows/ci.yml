@@ -83,6 +83,18 @@ jobs:
             timeout 15 env QT_QPA_PLATFORM=offscreen /opt/sentinelle/sentinelle || test $? -eq 124
           '
 
+      # Le paquet était construit, vérifié, puis jeté avec le runner : il fallait
+      # le reconstruire à la main pour chaque publication. Il est désormais
+      # téléchargeable depuis le run — celui d'un tag sert directement d'asset
+      # de release.
+      - name: Publier le .deb comme artefact du run
+        uses: actions/upload-artifact@v7
+        with:
+          name: sentinelle-deb
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 90
+
   # Agrégateur : c'est LE check requis par la protection de branche (contexte
   # « test », aussi attendu par l'auto-merge Dependabot). Il n'est vert que si
   # toute la matrice l'est ; `if: always()` l'empêche d'être « skipped » quand
