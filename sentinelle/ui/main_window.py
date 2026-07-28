@@ -14,11 +14,11 @@ import threading
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QMainWindow, QMenu, QMessageBox,
-                               QPushButton, QSpinBox, QSplitter, QStackedWidget,
-                               QToolButton, QTreeWidget, QTreeWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QMainWindow, QMenu,
+                               QMessageBox, QPushButton, QSpinBox, QSplitter,
+                               QStackedWidget, QToolButton, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import APP_NAME
 from ..config import (AppConfig, load_config, purger_cameras_sequences,
@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 MAX_TILES = 16
 CAP_CHOICES = [("Auto (16 max)", 16), ("1×1", 1), ("2×2", 4), ("3×3", 9), ("4×4", 16)]
+# espacement entre deux démarrages de tuiles (voir _set_grid) : assez long pour
+# sérialiser les initialisations VA-API, assez court pour remplir un mur de 16
+# en ~3 s
+ESPACEMENT_DEMARRAGE_MS = 200
 
 
 class MainWindow(QMainWindow):
@@ -39,11 +43,20 @@ class MainWindow(QMainWindow):
     # résultat du contrôle de session exécuté en arrière-plan :
     # "ok" | "reconnecte" | "interactif" | "erreur"
     _session_resultat = Signal(str)
+    # résultat du chargement de configuration serveur exécuté en arrière-plan :
+    # (cfg | None, erreur "" | "jeton" | message, initial)
+    _config_resultat = Signal(object, str, bool)
+    # résultat d'un appel serveur générique lancé par _executer_reseau :
+    # (résultat | None, erreur "" | message)
+    _reseau_resultat = Signal(object, str)
 
     def __init__(self, config_path: str):
         super().__init__()
         self._config_path = config_path             # config locale (mode autonome)
         self._cfg = AppConfig(path=config_path)
+        self._cfg_fetch_en_cours = False            # un chargement serveur est en vol
+        self._cfg_retry = 0                         # relances auto après erreur serveur
+        self._session_ui_en_cours = False           # page de connexion à l'écran
         self._tiles: dict[str, QWidget] = {}       # camera_id -> tuile (vidéo ou photo)
         self._mono_tile: VideoTile | None = None
         self._grid_dirty = False
@@ -54,6 +67,7 @@ class MainWindow(QMainWindow):
         self._motion_ids = set()                    # caméras actuellement en mouvement
         self._icon_widgets = []                     # (widget, nom_icone) à recolorer
         self._session_verif_en_cours = False        # un contrôle de session est en vol
+        self._login_differe = None                   # (user, mdp) à jouer HORS du thread UI
         from ..reglages import reglages
         self._settings = reglages()
         self._remote = self._creer_remote()         # None = mode autonome
@@ -82,22 +96,27 @@ class MainWindow(QMainWindow):
         from ..remote import ServeurDistant
         return ServeurDistant(url)
 
-    def _assurer_session(self) -> bool:
+    def _assurer_session(self, silencieux: bool = True) -> bool:
         """Garantit une session serveur ouverte. Tente les identifiants mémorisés,
-        sinon demande une connexion. Retourne True si connecté."""
+        sinon demande une connexion. Retourne True si connecté OU si une tentative
+        silencieuse est différée (elle sera jouée hors du thread UI).
+
+        silencieux=True : ne JAMAIS appeler login() sur le thread UI (gel jusqu'à
+        ~13 s sur réseau 4G lent au démarrage). Avec des identifiants mémorisés,
+        on diffère le login au thread de _load_config et on rend la main aussitôt.
+        silencieux=False : la tentative silencieuse a déjà échoué (jeton refusé) —
+        on passe directement à la connexion interactive."""
         if self._remote is None or self._remote.connecte:
             return True
         from ..config import desobfusquer, obfusquer
-        from ..remote import ErreurServeur
-        # tentative silencieuse avec les identifiants mémorisés
+        # tentative silencieuse avec les identifiants mémorisés : DIFFÉRÉE hors
+        # du thread UI (le login réseau bloquant est joué par _load_config)
         user = self._settings.value("serveur_user", "", type=str)
         mdp = desobfusquer(self._settings.value("serveur_pass", "", type=str))
-        if user and mdp:
-            try:
-                self._remote.login(user, mdp)
-                return True
-            except ErreurServeur:
-                pass
+        if silencieux and user and mdp:
+            self._login_differe = (user, mdp)
+            return True
+        self._login_differe = None
         # connexion interactive ; l'adresse est saisissable seulement si elle
         # n'est pas encore connue (premier paramétrage du poste)
         from PySide6.QtWidgets import QApplication
@@ -155,7 +174,7 @@ class MainWindow(QMainWindow):
         mémorisés (le jeton est rafraîchi en place sur l'objet partagé). Le
         résultat revient sur le thread Qt via _session_resultat."""
         if (self._remote is None or not self._remote.connecte
-                or self._session_verif_en_cours):
+                or self._session_verif_en_cours or self._session_ui_en_cours):
             return
         from ..config import desobfusquer
         self._session_verif_en_cours = True
@@ -172,7 +191,10 @@ class MainWindow(QMainWindow):
                     reste = remote.session_reste()
                 except JetonInvalide:
                     reste = 0                    # jeton mort : rafraîchir tout de suite
-                if reste is None or reste >= 86400:
+                # seuil = 2 ticks du contrôle (15 min) : l'ancien seuil de 24 h
+                # déclenchait un rafraîchissement (donc un rechargement complet)
+                # toutes les 15 min dès que le TTL serveur était ≤ 24 h
+                if reste is None or reste >= 1800:
                     res = "ok"
                 elif user and mdp:
                     try:
@@ -199,17 +221,30 @@ class MainWindow(QMainWindow):
         threading.Thread(target=work, daemon=True, name="session-check").start()
 
     def _on_session_resultat(self, res: str):
+        if res == "interactif" and QApplication.activeModalWidget() is not None:
+            # ne pas ouvrir la page de connexion PAR-DESSUS un dialogue en cours :
+            # on repasse dans 2 s (le drapeau reste levé : pas de double contrôle)
+            QTimer.singleShot(2000, lambda: self._on_session_resultat(res))
+            return
         self._session_verif_en_cours = False
         # la session a pu changer pendant le contrôle (déconnexion, bascule de
         # mode, autre serveur) : dans ce cas le résultat ne la concerne plus
         if self._remote is None or self._remote is not getattr(self, "_session_remote", None):
             return
         if res == "reconnecte":
-            # nouveau jeton : recharger pour régénérer les URLs de flux/snapshot
-            self._load_config()
+            # jeton rafraîchi EN PLACE : mettre à jour les URLs des caméras sans
+            # reconstruire le mur — le relais ne vérifie le jeton qu'à l'ouverture
+            # d'un flux, les lectures en cours survivent, et les tuiles utilisent
+            # le nouveau jeton à leur prochaine (re)connexion.
+            self._remote.maj_jeton_urls(self._cfg)
         elif res == "interactif":
             self._remote.jeton = ""
-            if self._assurer_session():
+            self._session_ui_en_cours = True
+            try:
+                ok = self._assurer_session()
+            finally:
+                self._session_ui_en_cours = False
+            if ok:
                 self._load_config()
 
     def _deconnecter(self):
@@ -229,6 +264,18 @@ class MainWindow(QMainWindow):
         self._vider_grille()
 
         self.hide()                              # ferme l'interface principale
+        # révoquer la session côté serveur (déconnexion réelle de tous les
+        # appareils) — best-effort, dans un thread pour ne pas geler l'UI.
+        # join(3) borné AVANT d'ouvrir la page de connexion : la révocation
+        # (bump de version côté serveur) doit précéder un éventuel re-login
+        # immédiat sur le MÊME compte, sinon elle invaliderait le jeton tout
+        # neuf. Fenêtre cachée à cet instant : la courte attente est invisible.
+        ancien = self._remote
+        if ancien is not None and ancien.connecte:
+            th = threading.Thread(target=ancien.deconnecter, daemon=True,
+                                  name="logout")
+            th.start()
+            th.join(timeout=3)
         self._remote = self._creer_remote()      # accès non authentifié
         if self._assurer_session():              # rouvre la page de connexion
             self._maj_bouton_admin()
@@ -259,6 +306,54 @@ class MainWindow(QMainWindow):
         else:
             self._ouvrir_admin()
 
+    # ------------------------------------------------------ appels serveur async
+
+    def _executer_reseau(self, fn, on_ok, titre: str):
+        """Exécute un appel serveur bloquant HORS du thread UI, avec l'interface
+        désactivée (l'event loop continue de tourner : pas de gel « ne répond
+        pas »). Le résultat revient sur le thread Qt et déclenche on_ok, ou une
+        boîte d'erreur en cas d'échec. Un seul appel à la fois (les actions qui
+        l'utilisent sont déclenchées depuis des dialogues modaux)."""
+        from PySide6.QtCore import Qt as _Qt
+        self._reseau_on_ok = on_ok
+        self._reseau_titre = titre
+        self.setEnabled(False)
+        QApplication.setOverrideCursor(_Qt.WaitCursor)
+
+        def work():
+            from ..remote import ErreurServeur
+            res, err, ok = None, "", False
+            try:
+                res = fn()
+                ok = True
+            except ErreurServeur as e:
+                err = str(e) or "serveur injoignable"
+            except Exception as e:
+                logger.exception("Appel serveur : erreur inattendue")
+                err = str(e) or "erreur inattendue"
+            finally:
+                # émettre dans le finally : même une erreur inattendue (y compris
+                # hors Exception) réactive l'UI — sinon fenêtre désactivée +
+                # curseur d'attente bloqués définitivement
+                if not ok and not err:
+                    err = "erreur inattendue"
+                try:
+                    self._reseau_resultat.emit(res, err)
+                except RuntimeError:
+                    pass                         # fenêtre détruite entre-temps
+        threading.Thread(target=work, daemon=True, name="reseau").start()
+
+    def _on_reseau_resultat(self, res, err: str):
+        QApplication.restoreOverrideCursor()
+        self.setEnabled(True)
+        on_ok, titre = self._reseau_on_ok, self._reseau_titre
+        self._reseau_on_ok = None
+        if err:
+            QMessageBox.warning(self, titre, f"Serveur injoignable :\n{err}")
+            return
+        if on_ok is not None:
+            on_ok(res)
+
     def _editer_sequences(self):
         """Édition des boucles : locales (autonome) ou personnelles (serveur)."""
         self._seq_stop()
@@ -270,28 +365,30 @@ class MainWindow(QMainWindow):
         if not accepte:
             self._load_config()              # annulé → on restaure
             return
+        from .toast import toast
         if self._remote is None:
             save_config(self._cfg)
             self._peupler_sequences()
+            toast(self, "Rondes enregistrées")
             return
-        from ..remote import ErreurServeur
-        try:
-            self._remote.pousser_boucles(self._cfg.sequences)
+        # envoi serveur hors du thread UI (gelait l'interface sur réseau lent)
+        sequences = self._cfg.sequences
+
+        def ok(_res):
             self._peupler_sequences()
-        except ErreurServeur as e:
-            QMessageBox.warning(self, "Boucles",
-                                f"Enregistrement impossible :\n{e}")
-            self._load_config()
+            toast(self, "Rondes enregistrées")
+        self._executer_reseau(
+            lambda: self._remote.pousser_boucles(sequences), ok, "Rondes")
 
     def _ouvrir_admin(self):
         if self._remote is None or not self._remote.admin:
             return
-        from ..remote import ErreurServeur
-        try:
-            cfg_admin = self._remote.config_admin()
-        except ErreurServeur as e:
-            QMessageBox.warning(self, "Administration", f"Serveur injoignable :\n{e}")
-            return
+        # récupération de la config d'admin hors du thread UI, puis ouverture
+        self._executer_reseau(
+            lambda: self._remote.config_admin(),
+            self._ouvrir_admin_dialog, "Administration")
+
+    def _ouvrir_admin_dialog(self, cfg_admin):
         from .admin_dialog import AdminDialog
         dlg = AdminDialog(cfg_admin, self._remote, self)
         dlg.exec()
@@ -301,6 +398,9 @@ class MainWindow(QMainWindow):
             self._basculer_vers_serveur()
         elif dlg.recharger:
             self._load_config()
+        if dlg.enregistre:
+            from .toast import toast
+            toast(self, "Modifications enregistrées sur le serveur")
 
     # ------------------------------------------------------------------- UI
     #
@@ -364,8 +464,27 @@ class MainWindow(QMainWindow):
         for label, _cap in CAP_CHOICES:
             self._cap_combo.addItem(label)
         self._cap_combo.setToolTip("Nombre de caméras affichées par page")
+        self._cap_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self._cap_combo.currentIndexChanged.connect(self._selection_changee)
         lay.addWidget(self._cap_combo)
+
+        # navigation manuelle entre pages (visible seulement s'il y en a
+        # plusieurs) : avant, seule la rotation automatique les faisait défiler
+        self._nav_box = QWidget()
+        nav = QHBoxLayout(self._nav_box)
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(0)
+        self._btn_page_prec = self._tbtn("chevron-left", "", "Page précédente (PgPréc)",
+                                         lambda: self._changer_page(-1))
+        self._lbl_page = QLabel("")
+        self._lbl_page.setObjectName("pageInfo")
+        self._btn_page_suiv = self._tbtn("chevron-right", "", "Page suivante (PgSuiv)",
+                                         lambda: self._changer_page(+1))
+        nav.addWidget(self._btn_page_prec)
+        nav.addWidget(self._lbl_page)
+        nav.addWidget(self._btn_page_suiv)
+        self._nav_box.setVisible(False)
+        lay.addWidget(self._nav_box)
         lay.addWidget(self._sep())
 
         # rotation
@@ -381,18 +500,19 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._rot_spin)
         lay.addWidget(self._sep())
 
-        # boucles
+        # rondes
         self._seq_combo = QComboBox()
         self._seq_combo.setMinimumWidth(120)
         self._seq_combo.setMaximumWidth(220)
-        self._seq_combo.setToolTip("Boucle à lire")
+        self._seq_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self._seq_combo.setToolTip("Ronde à lire")
         lay.addWidget(self._seq_combo)
         self._act_seq = self._tbtn("play", "Lire",
-                                   "Lire ou arrêter la boucle sélectionnée",
+                                   "Lire ou arrêter la ronde sélectionnée",
                                    self._seq_basculee, checkable=True)
         lay.addWidget(self._act_seq)
-        self._btn_boucles = self._tbtn("pencil", "Boucles",
-                                       "Créer et modifier vos boucles",
+        self._btn_boucles = self._tbtn("route", "Rondes",
+                                       "Créer et modifier vos rondes",
                                        self._editer_sequences)
         lay.addWidget(self._btn_boucles)
 
@@ -450,7 +570,9 @@ class MainWindow(QMainWindow):
         # raccourcis clavier (indépendants des boutons)
         for seq, slot in (("Ctrl+G", self._retour_manuel_grille),
                           ("F11", self._toggle_fullscreen),
-                          ("Ctrl+,", self._ouvrir_configuration)):
+                          ("Ctrl+,", self._ouvrir_configuration),
+                          ("PgUp", lambda: self._changer_page(-1)),
+                          ("PgDown", lambda: self._changer_page(+1))):
             a = QAction(self)
             a.setShortcut(QKeySequence(seq))
             a.triggered.connect(slot)
@@ -472,20 +594,42 @@ class MainWindow(QMainWindow):
         entete = QFrame()
         entete.setObjectName("sideHeader")
         eh = QHBoxLayout(entete)
-        eh.setContentsMargins(14, 12, 14, 12)
+        eh.setContentsMargins(14, 10, 10, 10)
         titre = QLabel("CAMÉRAS")
         titre.setObjectName("sideTitle")
         self._side_count = QLabel("")
         self._side_count.setObjectName("sideCount")
+        btn_tout = self._tbtn("check-square", "", "Cocher toutes les caméras",
+                              self._tout_cocher)
+        btn_rien = self._tbtn("square", "", "Tout décocher", self._tout_decocher)
+        for b in (btn_tout, btn_rien):
+            b.setIconSize(QSize(15, 15))
         eh.addWidget(titre)
         eh.addStretch(1)
         eh.addWidget(self._side_count)
+        eh.addWidget(btn_tout)
+        eh.addWidget(btn_rien)
         v.addWidget(entete)
+
+        # recherche : indispensable dès que le parc dépasse quelques sites
+        from PySide6.QtWidgets import QLineEdit
+        zone = QFrame()
+        zone.setObjectName("sideSearch")
+        zl = QHBoxLayout(zone)
+        zl.setContentsMargins(8, 6, 8, 6)
+        self._recherche = QLineEdit()
+        self._recherche.setPlaceholderText("Rechercher…")
+        self._recherche.setClearButtonEnabled(True)
+        self._recherche.textChanged.connect(self._filtrer_arbre)
+        zl.addWidget(self._recherche)
+        v.addWidget(zone)
 
         self._tree = QTreeWidget()
         self._tree.setObjectName("cameraTree")
         self._tree.setHeaderHidden(True)
         self._tree.setIndentation(14)
+        from .widgets import BadgeDelegate
+        self._tree.setItemDelegate(BadgeDelegate(self._tree))
         # on coche, on ne « sélectionne » pas : pas de surbrillance persistante
         self._tree.setSelectionMode(QTreeWidget.NoSelection)
         self._tree.setFocusPolicy(Qt.NoFocus)
@@ -513,14 +657,16 @@ class MainWindow(QMainWindow):
 
     def _build_stage(self) -> QWidget:
         self._grid_page = QWidget()
+        self._grid_page.setObjectName("gridPage")
         self._grid_layout = QGridLayout(self._grid_page)
         self._grid_layout.setContentsMargins(3, 3, 3, 3)
         self._grid_layout.setSpacing(3)
 
-        self._placeholder = QLabel()
-        self._placeholder.setAlignment(Qt.AlignCenter)
+        from .widgets import EmptyState
+        self._placeholder = EmptyState()
 
         self._mono_page = QWidget()
+        self._mono_page.setObjectName("monoPage")
         self._mono_layout = QVBoxLayout(self._mono_page)
         self._mono_layout.setContentsMargins(3, 3, 3, 3)
 
@@ -557,6 +703,10 @@ class MainWindow(QMainWindow):
         self._session_timer.setInterval(15 * 60 * 1000)
         self._session_timer.timeout.connect(self._verifier_session)
         self._session_resultat.connect(self._on_session_resultat)
+        self._config_resultat.connect(self._on_config_resultat)
+        self._reseau_resultat.connect(self._on_reseau_resultat)
+        self._reseau_on_ok = None
+        self._reseau_titre = ""
 
     def _tbtn(self, nom_icone: str, texte: str, tooltip: str, slot,
               checkable: bool = False) -> QToolButton:
@@ -588,10 +738,13 @@ class MainWindow(QMainWindow):
     def _apply_theme_chrome(self):
         """Applique les couleurs du thème aux zones qui entourent la vidéo."""
         from .theme import t
-        fond = f"background-color: {t('video_bg')};"
-        self._grid_page.setStyleSheet(fond)
-        self._mono_page.setStyleSheet(fond)
-        self._placeholder.setStyleSheet(f"color: {t('text_dim')}; font-size: 14px;")
+        # sélecteurs par nom : une feuille sans sélecteur se propagerait aux
+        # enfants (le bouton de l'écran vide perdait son style)
+        self._grid_page.setStyleSheet(
+            f"QWidget#gridPage {{ background-color: {t('video_bg')}; }}")
+        self._mono_page.setStyleSheet(
+            f"QWidget#monoPage {{ background-color: {t('video_bg')}; }}")
+        self._placeholder.restyle()
 
     def _all_tiles(self) -> list:
         if self._mono_tile is not None:
@@ -616,36 +769,116 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------- configuration
 
     def _load_config(self, initial: bool = False):
-        if self._remote is not None:
-            from ..remote import ErreurServeur, JetonInvalide
-            try:
-                cfg = self._remote.config_vue()
-            except JetonInvalide:
-                # session expirée (mot de passe changé, serveur redémarré…)
-                self._remote.jeton = ""
-                if self._assurer_session():
-                    return self._load_config(initial)
-                cfg = AppConfig(path="")
-            except ErreurServeur as e:
-                cfg = AppConfig(path="")
-                QMessageBox.warning(
-                    self, "Serveur",
-                    f"Connexion au serveur impossible :\n{e}\n\n"
-                    "Vérifiez l'adresse et reconnectez-vous dans la Configuration.")
-            except Exception as e:
-                cfg = AppConfig(path="")
-                QMessageBox.warning(self, "Serveur", f"Erreur inattendue : {e}")
-        else:
+        if self._remote is None:
             try:
                 cfg = load_config(self._config_path)
             except Exception as e:
                 QMessageBox.critical(self, "Configuration", str(e))
                 return
+            self._appliquer_config(cfg, initial)
+            return
 
+        # mode serveur : la récupération HTTP (jusqu'à ~13 s de timeout) se fait
+        # HORS du thread UI — elle gelait toute l'interface à chaque rechargement.
+        # La garde est liée à l'objet remote : après une déconnexion/bascule, un
+        # chargement de l'ANCIENNE session ne doit pas bloquer celui de la nouvelle.
+        if self._cfg_fetch_en_cours and self._remote is getattr(self, "_cfg_remote", None):
+            return
+        self._cfg_fetch_en_cours = True
+        remote = self._remote
+        self._cfg_remote = remote               # sur quel objet ce chargement porte
+        creds = self._login_differe             # login silencieux à jouer dans le thread
+        self.statusBar().showMessage("Chargement de la configuration…")
+
+        def work():
+            from ..remote import ErreurServeur, JetonInvalide
+            cfg, err = None, ""
+            try:
+                # login silencieux différé : joué ICI (thread), jamais sur l'UI.
+                # Conservé sur network error (retenté au prochain essai) ; sur
+                # jeton refusé, _on_config_resultat bascule en interactif.
+                if creds and not remote.connecte:
+                    remote.login(*creds)
+                cfg = remote.config_vue()
+            except JetonInvalide:
+                err = "jeton"
+            except ErreurServeur as e:
+                err = str(e) or "serveur injoignable"
+            except Exception as e:
+                logger.exception("Chargement de la configuration : erreur inattendue")
+                err = str(e) or "erreur inattendue"
+            try:
+                self._config_resultat.emit(cfg, err, initial)
+            except RuntimeError:
+                pass                             # fenêtre détruite entre-temps
+        threading.Thread(target=work, daemon=True, name="config-fetch").start()
+
+    def _on_config_resultat(self, cfg, err: str, initial: bool):
+        # la session a pu changer pendant le chargement (déconnexion, bascule…) :
+        # résultat obsolète — sans toucher au drapeau d'un chargement plus récent
+        if self._remote is None or self._remote is not getattr(self, "_cfg_remote", None):
+            return
+        self._cfg_fetch_en_cours = False
+        if QApplication.activeModalWidget() is not None:
+            # un dialogue d'édition est ouvert : appliquer maintenant écraserait
+            # la config en cours d'édition — on repasse quand il sera fermé
+            self._cfg_fetch_en_cours = True      # bloque un nouveau chargement
+            QTimer.singleShot(1500, lambda: self._on_config_resultat(cfg, err, initial))
+            return
+
+        if err == "jeton":
+            # session expirée (mot de passe changé, serveur redémarré…) OU
+            # identifiants mémorisés refusés lors du login différé. Le verrou
+            # empêche une relance programmée (backoff, contrôle de session) de
+            # partir avec un jeton vide PENDANT la page de connexion — elle
+            # rouvrait une seconde page par-dessus la première.
+            self._remote.jeton = ""
+            self._login_differe = None           # la tentative silencieuse a échoué
+            self._session_ui_en_cours = True
+            try:
+                ok = self._assurer_session(silencieux=False)
+            finally:
+                self._session_ui_en_cours = False
+            if ok:
+                self._load_config(initial)
+                return
+            err = "session expirée"
+
+        if err:
+            # on GARDE la configuration et le mur actuels (les tuiles ont leur
+            # propre reconnexion) au lieu de tout remplacer par une config vide,
+            # et on retente tout seul avec un délai croissant.
+            self._cfg_retry += 1
+            delay = min(5 * (2 ** (self._cfg_retry - 1)), 60)
+            self.statusBar().showMessage(
+                f"Serveur injoignable ({err}) — nouvel essai dans {delay}s")
+            if not self._cfg.cameras:
+                self._selection_appliquee()      # placeholder « non connecté »
+            # préserver `initial` à travers la relance : sinon un accroc réseau au
+            # démarrage (site 4G) ferait perdre la « ronde au démarrage » du poste
+            self._cfg_initial_attente = initial
+            QTimer.singleShot(delay * 1000, self._relancer_load_config)
+            return
+
+        self._cfg_retry = 0
+        self._login_differe = None               # session ouverte : plus rien à différer
+        self._appliquer_config(cfg, initial)
+
+    def _relancer_load_config(self):
+        if (self._remote is not None and not self._cfg_fetch_en_cours
+                and not self._session_ui_en_cours
+                and self._remote is getattr(self, "_cfg_remote", None)):
+            self._load_config(getattr(self, "_cfg_initial_attente", False))
+
+    def _appliquer_config(self, cfg, initial: bool = False):
         self.statusBar().clearMessage()      # efface un éventuel message persistant
         self._seq_stop()
         self._leave_mono()
         self._vider_grille()
+        # revenir explicitement à la page grille : un rechargement reçu en vue
+        # mono laissait la pile sur une page mono vidée — écran noir définitif
+        self._stack.setCurrentWidget(self._grid_page)
+        self._act_grid.setEnabled(False)
         self._cfg = cfg
 
         self._rot_spin.blockSignals(True)
@@ -665,6 +898,10 @@ class MainWindow(QMainWindow):
             self._motion_assurer()
             self._motion.surveiller(list(self._cfg.cameras))
         self._maj_session_timer()
+        # le login différé (identifiants mémorisés) n'ouvre la session que
+        # maintenant, dans le thread : rejouer le calcul du bouton Administration
+        # qui, à l'ouverture, voyait encore remote.connecte == False
+        self._maj_bouton_admin()
 
         if cfg.warnings:
             QMessageBox.warning(
@@ -674,6 +911,17 @@ class MainWindow(QMainWindow):
         if initial and self._remote is None and not cfg.cameras:
             # premier lancement en mode autonome : ouvrir la configuration
             QTimer.singleShot(200, self._ouvrir_configuration)
+
+        if initial:
+            # ronde au démarrage (réglage du poste) : un mur redémarré reprend
+            # sa ronde sans intervention — uniquement au premier chargement,
+            # jamais sur un simple rechargement de configuration
+            nom = self._settings.value("ronde_auto", "", type=str)
+            i = next((k for k, s in enumerate(self._cfg.sequences)
+                      if s.nom == nom), -1) if nom else -1
+            if i >= 0:
+                self._seq_combo.setCurrentIndex(i)
+                self._act_seq.setChecked(True)      # déclenche la lecture
 
     def _ouvrir_configuration(self):
         etait_en_seq = self._seq is not None
@@ -700,10 +948,16 @@ class MainWindow(QMainWindow):
         # mode serveur : préférences du poste (compte + déconnexion). La gestion
         # serveur (dont le mode) est dans le panneau Administration.
         from .config_dialogs import PreferencesDialog
-        dlg = PreferencesDialog(self._remote, self)
+        dlg = PreferencesDialog(self._remote, self,
+                                noms_rondes=[s.nom for s in self._cfg.sequences])
         dlg.exec()
         if dlg.deconnexion:
             self._deconnecter()
+        elif self._remote is not None:
+            # un changement de mot de passe a renouvelé le jeton relay : réaligner
+            # les URLs RTSP sur le nouveau jeton (les lectures en cours survivent,
+            # les reconnexions utiliseront le jeton frais). Sans effet sinon.
+            self._remote.maj_jeton_urls(self._cfg)
         elif etait_en_seq:
             self._update_status()
 
@@ -757,30 +1011,108 @@ class MainWindow(QMainWindow):
         self._load_config()
 
     def _peupler_arbre(self):
+        from .widgets import ROLE_BADGES
         cochees = set(self._settings.value("cameras_cochees", [], type=list))
+        connus = {c.id for c in self._cfg.cameras}
+        if connus and (cochees - connus):
+            # caméras disparues (droits modifiés, site supprimé…) : purger, sinon
+            # le poste redémarre sur un mur vide sans explication
+            cochees &= connus
+            self._settings.setValue("cameras_cochees", sorted(cochees))
+
+        # préserve l'état plié/déplié entre deux rechargements de configuration
+        premier = self._tree.topLevelItemCount() == 0
+        deplies = {self._tree.topLevelItem(i).data(0, Qt.UserRole + 1)
+                   for i in range(self._tree.topLevelItemCount())
+                   if self._tree.topLevelItem(i).isExpanded()}
+
         self._tree.blockSignals(True)
         self._tree.clear()
         for site in self._cfg.sites:
             cams = [c for c in self._cfg.cameras if c.site.id == site.id]
             if not cams:
                 continue
-            lien = " · 4G" if site.lien == "4g" else ""
-            site_item = QTreeWidgetItem([f"{site.nom}{lien}"])
+            site_item = QTreeWidgetItem([site.nom])
             site_item.setData(0, Qt.UserRole + 1, site.id)
+            if site.lien == "4g":
+                site_item.setData(0, ROLE_BADGES, ["4G"])
             site_item.setFlags(site_item.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
             for cam in cams:
-                extra = " · photo" if cam.profil == "eco-extreme" else (
-                    " · éco" if cam.profil == "eco" else "")
-                item = QTreeWidgetItem([f"{cam.nom}{extra}"])
+                item = QTreeWidgetItem([cam.nom])
+                if cam.profil == "eco-extreme":
+                    item.setData(0, ROLE_BADGES, ["photo"])
+                elif cam.profil == "eco":
+                    item.setData(0, ROLE_BADGES, ["éco"])
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setData(0, Qt.UserRole, cam.id)
                 item.setCheckState(0, Qt.Checked if cam.id in cochees else Qt.Unchecked)
                 site_item.addChild(item)
             self._tree.addTopLevelItem(site_item)
-        self._tree.expandAll()
+            site_item.setExpanded(premier or site_item.data(0, Qt.UserRole + 1) in deplies)
         self._tree.blockSignals(False)
+        if self._recherche.text():
+            self._filtrer_arbre(self._recherche.text())
         n = len(self._cfg.cameras)
         self._side_count.setText(str(n) if n else "")
+        self._side_count.setVisible(bool(n))
+
+    # ------------------------------------------------ actions du panneau caméras
+
+    def _filtrer_arbre(self, texte: str):
+        from .camera_picker import _simplifier
+        cle = _simplifier(texte.strip())
+        for i in range(self._tree.topLevelItemCount()):
+            si = self._tree.topLevelItem(i)
+            site_ok = cle in _simplifier(si.text(0))
+            visibles = 0
+            for j in range(si.childCount()):
+                ci = si.child(j)
+                cam_ok = not cle or site_ok or cle in _simplifier(ci.text(0))
+                ci.setHidden(not cam_ok)
+                visibles += 0 if ci.isHidden() else 1
+            si.setHidden(bool(cle) and visibles == 0)
+            if cle:
+                si.setExpanded(True)
+
+    def _cocher_tout(self, etat: bool, site_id: str | None = None):
+        """Coche/décoche d'un geste (tout le parc ou un site entier)."""
+        self._tree.blockSignals(True)
+        for i in range(self._tree.topLevelItemCount()):
+            si = self._tree.topLevelItem(i)
+            if site_id is not None and si.data(0, Qt.UserRole + 1) != site_id:
+                continue
+            for j in range(si.childCount()):
+                si.child(j).setCheckState(0, Qt.Checked if etat else Qt.Unchecked)
+        self._tree.blockSignals(False)
+        self._coche_changee(None, 0)
+
+    def _tout_cocher(self):
+        self._cocher_tout(True)
+
+    def _tout_decocher(self):
+        self._cocher_tout(False)
+
+    # ------------------------------------------------------ navigation de pages
+
+    def _changer_page(self, delta: int):
+        if self._seq is not None:
+            return
+        pages = self._pages()
+        if len(pages) < 2:
+            return
+        if self._stack.currentWidget() is self._mono_page:
+            self._go_grid()
+        self._page = (self._page + delta) % len(pages)
+        self._set_grid(pages[self._page])
+        self._maj_nav()
+
+    def _maj_nav(self):
+        pages = self._pages()
+        visible = (len(pages) > 1 and self._seq is None
+                   and self._stack.currentWidget() is self._grid_page)
+        self._nav_box.setVisible(visible)
+        if visible:
+            self._lbl_page.setText(f" {self._page % len(pages) + 1}/{len(pages)} ")
 
     def _a_camera_onvif(self) -> bool:
         return any(c.marque == "onvif" or getattr(c, "remote_onvif", False)
@@ -800,8 +1132,13 @@ class MainWindow(QMainWindow):
     def _peupler_sequences(self):
         self._seq_combo.clear()
         for s in self._cfg.sequences:
-            self._seq_combo.addItem(s.nom)
+            self._seq_combo.addItem(icon("lock") if s.partagee else icon("route"),
+                                    s.nom)
         actif = bool(self._cfg.sequences)
+        # sans ronde, une liste vide grisée à côté de « Lire » n'aide personne :
+        # on masque, seul le bouton Rondes (création) reste
+        self._seq_combo.setVisible(actif)
+        self._act_seq.setVisible(actif)
         self._seq_combo.setEnabled(actif)
         self._act_seq.setEnabled(actif)
 
@@ -851,12 +1188,11 @@ class MainWindow(QMainWindow):
         pages = self._pages()
         if not pages:
             self._set_grid([])
+            self._maj_nav()
             return
         self._page %= len(pages)
         self._set_grid(pages[self._page])
-        if len(pages) > 1:
-            self.statusBar().showMessage(
-                f"Page {self._page + 1}/{len(pages)}", 4000)
+        self._maj_nav()
 
     # ----------------------------------------------------------------- grille
 
@@ -868,18 +1204,17 @@ class MainWindow(QMainWindow):
             tile = VideoTile(cam, vue)
         tile.double_clicked.connect(self._tuile_double_clic)
         tile.state_changed.connect(self._update_status)
+        from .toast import toast
         tile.snapshot_saved.connect(
-            lambda p: self.statusBar().showMessage(f"Image enregistrée : {p}", 6000))
+            lambda p: toast(self, f"Image enregistrée : {p}"))
         if cam.id in self._motion_ids and hasattr(tile, "set_motion"):
             tile.set_motion(True)
         return tile
 
     def _vider_grille(self):
         for tile in self._tiles.values():
-            tile.shutdown()
             self._grid_layout.removeWidget(tile)
-            tile.setParent(None)
-            tile.deleteLater()
+            tile.dispose()      # libère mpv hors thread UI puis se détruit
         self._tiles.clear()
 
     def _set_grid(self, ids: list[str]):
@@ -895,23 +1230,13 @@ class MainWindow(QMainWindow):
         for cam_id in list(self._tiles):
             if cam_id not in ids:
                 tile = self._tiles.pop(cam_id)
-                tile.shutdown()
                 self._grid_layout.removeWidget(tile)
-                tile.setParent(None)
-                tile.deleteLater()
+                tile.dispose()
 
         for cam_id in ids:
             if cam_id not in self._tiles:
                 tile = self._make_tile(self._cfg.camera(cam_id), vue)
                 self._tiles[cam_id] = tile
-
-        # (re)démarre toute tuile affichée à l'arrêt : une tuile conservée d'une
-        # étape précédente (ex. retour de vue mono dans une boucle) a été stoppée
-        # et doit repartir, sans reconnecter celles déjà en lecture.
-        if not paused:
-            for tile in self._tiles.values():
-                if tile.state == TileState.IDLE:
-                    tile.start()
 
         for tile in self._tiles.values():
             self._grid_layout.removeWidget(tile)
@@ -927,21 +1252,38 @@ class MainWindow(QMainWindow):
         ordered = [self._tiles[cid] for cid in ids if cid in self._tiles]
         if not ordered:
             if self._act_motion_auto.isChecked():
-                txt = "Vue mouvement active — en attente d'activité sur une caméra…"
+                self._placeholder.afficher(
+                    "motion", "Vue mouvement active",
+                    "La grille affichera les caméras dès qu'elles détectent "
+                    "une activité.")
             elif not self._cfg.cameras:
                 if self._remote is not None and not self._remote.connecte:
-                    txt = ("Non connecté au serveur.\n"
-                           "Ouvrez la Configuration pour vous connecter.")
+                    self._placeholder.afficher(
+                        "lock", "Non connecté au serveur",
+                        "La connexion sera retentée automatiquement.",
+                        "Réessayer maintenant", self._load_config)
+                elif self._remote is not None and self._remote.admin:
+                    self._placeholder.afficher(
+                        "camera", "Aucune caméra configurée",
+                        "Ajoutez vos sites et vos enregistreurs depuis le "
+                        "panneau d'administration.",
+                        "Ouvrir l'administration", self._ouvrir_admin)
                 elif self._remote is not None:
-                    txt = ("Aucune caméra ne vous est attribuée.\n"
-                           "Rapprochez-vous de votre administrateur.")
+                    self._placeholder.afficher(
+                        "users", "Aucune caméra attribuée",
+                        "Votre compte n'a accès à aucune caméra pour le moment.\n"
+                        "Rapprochez-vous de votre administrateur.")
                 else:
-                    txt = ("Aucune caméra configurée.\n"
-                           "Ouvrez la Configuration pour ajouter vos sites et vos DVR.")
+                    self._placeholder.afficher(
+                        "camera", "Aucune caméra configurée",
+                        "Ajoutez vos sites et vos enregistreurs pour commencer.",
+                        "Ouvrir la configuration", self._ouvrir_configuration)
             else:
-                txt = ("Sélectionnez des caméras dans le panneau de gauche.\n"
-                       "Double-clic : plein écran   ·   Clic droit : options")
-            self._placeholder.setText(txt)
+                self._placeholder.afficher(
+                    "grid", "Aucune caméra affichée",
+                    "Cochez des caméras dans le panneau de gauche.\n"
+                    "Double-clic : plein écran   ·   Clic droit : options",
+                    "Afficher toutes les caméras", self._tout_cocher)
             self._grid_layout.addWidget(self._placeholder, 0, 0)
         else:
             cols = math.ceil(math.sqrt(len(ordered)))
@@ -951,8 +1293,36 @@ class MainWindow(QMainWindow):
                 self._grid_layout.setColumnStretch(c, 1)
             for r in range(math.ceil(len(ordered) / cols)):
                 self._grid_layout.setRowStretch(r, 1)
+
+        # (re)démarre APRÈS l'insertion dans la grille : démarrer avant prenait
+        # le winId() d'une fenêtre native créée hors hiérarchie, puis reparentée
+        # — identifiant potentiellement recréé sous X11, donc wid mpv périmé.
+        # Relance aussi toute tuile conservée à l'arrêt (retour de vue mono).
+        # Démarrages ÉCHELONNÉS : 16 mpv qui initialisent VA-API et ouvrent leur
+        # flux au même instant se marchent dessus sur un iGPU d'entrée de gamme —
+        # les initialisations perdantes retombent DÉFINITIVEMENT en décodage
+        # logiciel (constaté sur mur N4020 : 3 tuiles en vaapi, 13 en logiciel).
+        if not paused:
+            attente = 0
+            for tile in self._tiles.values():
+                if tile.state == TileState.IDLE:
+                    self._start_tuile_differe(tile, attente)
+                    attente += ESPACEMENT_DEMARRAGE_MS
         self._grid_dirty = False
         self._update_status()
+
+    def _start_tuile_differe(self, tile, delai_ms: int):
+        """Démarre une tuile après delai_ms, si elle est toujours affichée et à
+        l'arrêt (la grille a pu être reconstruite entre-temps). Le QTimer est lié
+        à la tuile : détruite, le rappel n'est jamais invoqué."""
+        if delai_ms <= 0:
+            tile.start()
+            return
+
+        def go(t=tile):
+            if t in self._tiles.values() and t.state == TileState.IDLE:
+                t.start()
+        QTimer.singleShot(delai_ms, tile, go)
 
     # ------------------------------------------------------------------- mono
 
@@ -975,10 +1345,8 @@ class MainWindow(QMainWindow):
 
     def _leave_mono(self):
         if self._mono_tile is not None:
-            self._mono_tile.shutdown()
             self._mono_layout.removeWidget(self._mono_tile)
-            self._mono_tile.setParent(None)
-            self._mono_tile.deleteLater()
+            self._mono_tile.dispose()
             self._mono_tile = None
 
     def _go_grid(self):
@@ -990,6 +1358,7 @@ class MainWindow(QMainWindow):
         elif not self._act_pause.isChecked():
             for tile in self._tiles.values():
                 tile.start()
+        self._maj_nav()
         self._update_status()
 
     def _retour_manuel_grille(self):
@@ -997,9 +1366,14 @@ class MainWindow(QMainWindow):
         self._go_grid()
 
     def _tuile_double_clic(self, cam_id: str):
+        # mémorise la vue AVANT _seq_stop : pendant une étape mono de boucle,
+        # _seq_stop ramène déjà à la grille, et le test après coup re-basculait
+        # aussitôt en mono au lieu de rendre la main à l'utilisateur
+        en_mono = self._stack.currentWidget() is self._mono_page
         self._seq_stop()
-        if self._stack.currentWidget() is self._mono_page:
-            self._go_grid()
+        if en_mono:
+            if self._stack.currentWidget() is self._mono_page:
+                self._go_grid()
         else:
             self._set_mono(cam_id)
 
@@ -1012,36 +1386,44 @@ class MainWindow(QMainWindow):
     # ------------------------------------------- édition à chaud (clic droit)
 
     def _menu_arbre(self, pos):
-        """La configuration se modifie à tout moment, directement depuis l'arbre."""
-        if self._remote is not None:
-            # mode serveur : l'édition passe par la fenêtre Configuration
-            menu = QMenu(self)
-            menu.addAction(icon("settings"), "Configuration…",
-                           self._ouvrir_configuration)
-            menu.exec(self._tree.viewport().mapToGlobal(pos))
-            return
+        """Actions rapides sur l'arbre : affichage pour tous, édition de la
+        configuration en mode autonome."""
         item = self._tree.itemAt(pos)
         cam_id = item.data(0, Qt.UserRole) if item else None
         site_id = item.data(0, Qt.UserRole + 1) if item else None
 
         menu = QMenu(self)
-        if cam_id:
-            cam = self._cfg.camera(cam_id)
-            if cam:
-                menu.addAction(icon("pencil"), f"Modifier « {cam.nom} »…",
-                               lambda: self._modifier_camera(cam_id))
-                menu.addAction(icon("trash"), "Supprimer cette caméra",
-                               lambda: self._supprimer_camera(cam_id))
-                menu.addSeparator()
-                site_id = cam.site.id
-        if site_id:
-            site = self._cfg.site(site_id)
-            if site:
-                menu.addAction(icon("plus"), f"Ajouter un DVR sur « {site.nom} »…",
-                               lambda: self._ajouter_dvr_rapide(site_id))
-                menu.addAction(icon("pencil"), f"Modifier le site « {site.nom} »…",
-                               lambda: self._modifier_site(site_id))
-                menu.addSeparator()
+        cam = self._cfg.camera(cam_id) if cam_id else None
+        if cam is not None:
+            menu.addAction(icon("maximize"), f"Plein écran sur « {cam.nom} »",
+                           lambda: (self._seq_stop(), self._set_mono(cam_id)))
+            site_id = cam.site.id
+        site = self._cfg.site(site_id) if site_id else None
+        if site is not None:
+            menu.addAction(icon("check-square"), f"Cocher tout « {site.nom} »",
+                           lambda: self._cocher_tout(True, site_id))
+        menu.addAction(icon("square"), "Tout décocher", self._tout_decocher)
+        menu.addSeparator()
+
+        if self._remote is not None:
+            # mode serveur : l'édition passe par l'administration / Configuration
+            menu.addAction(icon("settings"), "Configuration…",
+                           self._ouvrir_configuration)
+            menu.exec(self._tree.viewport().mapToGlobal(pos))
+            return
+
+        if cam is not None:
+            menu.addAction(icon("pencil"), f"Modifier « {cam.nom} »…",
+                           lambda: self._modifier_camera(cam_id))
+            menu.addAction(icon("trash"), "Supprimer cette caméra",
+                           lambda: self._supprimer_camera(cam_id))
+            menu.addSeparator()
+        if site is not None:
+            menu.addAction(icon("plus"), f"Ajouter un DVR sur « {site.nom} »…",
+                           lambda: self._ajouter_dvr_rapide(site_id))
+            menu.addAction(icon("pencil"), f"Modifier le site « {site.nom} »…",
+                           lambda: self._modifier_site(site_id))
+            menu.addSeparator()
         menu.addAction(icon("plus"), "Ajouter un DVR…", self._ajouter_dvr_rapide)
         menu.addAction(icon("settings"), "Configuration complète…",
                        self._ouvrir_configuration)
@@ -1050,6 +1432,8 @@ class MainWindow(QMainWindow):
     def _appliquer_et_sauver(self):
         save_config(self._cfg)
         self._load_config()
+        from .toast import toast
+        toast(self, "Configuration enregistrée")
 
     def _modifier_camera(self, cam_id: str):
         cam = self._cfg.camera(cam_id)
@@ -1110,6 +1494,9 @@ class MainWindow(QMainWindow):
     def _rotation_tick(self):
         if self._seq is not None or self._act_pause.isChecked():
             return
+        if QApplication.activeModalWidget() is not None:
+            return      # ne pas changer de vue (ni ouvrir de mainstream) derrière
+                        # un dialogue d'édition ; le tick suivant reprendra
         if self._stack.currentWidget() is self._mono_page:
             # mono : caméra suivante parmi les cochées
             ids = self._cameras_cochees()
@@ -1126,6 +1513,7 @@ class MainWindow(QMainWindow):
                 return
             self._page = (self._page + 1) % len(pages)
             self._set_grid(pages[self._page])
+            self._maj_nav()
             self.statusBar().showMessage(f"Rotation — page {self._page + 1}/{len(pages)}", 3000)
 
     # -------------------------------------------------------------- séquences
@@ -1157,7 +1545,10 @@ class MainWindow(QMainWindow):
             self._act_seq.blockSignals(False)
         self._act_seq.setIcon(icon("play"))
         self._act_seq.setText("Lire")
-        # retour à l'affichage piloté par la sélection
+        # retour à l'affichage piloté par la sélection — la grille affichée par
+        # la dernière étape de la boucle ne correspond pas aux caméras cochées :
+        # forcer la reconstruction, sinon on relançait les caméras de la boucle
+        self._grid_dirty = True
         if self._stack.currentWidget() is self._mono_page:
             self._go_grid()
         else:
@@ -1170,7 +1561,16 @@ class MainWindow(QMainWindow):
         if not etapes:
             self._seq_stop()
             return
-        self._seq_idx = (self._seq_idx + 1) % len(etapes)
+        # ignore les étapes sans caméra (donnée incohérente reçue du serveur :
+        # schéma plus ancien, édition manuelle, migration) plutôt que de planter
+        # sur un IndexError pendant la lecture de la ronde
+        for _ in range(len(etapes)):
+            self._seq_idx = (self._seq_idx + 1) % len(etapes)
+            if etapes[self._seq_idx].cameras:
+                break
+        else:
+            self._seq_stop()                     # aucune étape exploitable
+            return
         etape = etapes[self._seq_idx]
 
         if etape.mode == "mono":
@@ -1180,8 +1580,9 @@ class MainWindow(QMainWindow):
             self._stack.setCurrentWidget(self._grid_page)
             self._act_grid.setEnabled(False)
             self._set_grid(etape.cameras)
+        self._maj_nav()
         self.statusBar().showMessage(
-            f"Boucle {self._seq.nom} : étape {self._seq_idx + 1}/{len(etapes)}",
+            f"Ronde {self._seq.nom} : étape {self._seq_idx + 1}/{len(etapes)}",
             etape.duree_s * 1000)
         self._seq_timer.start(etape.duree_s * 1000)
 
@@ -1242,6 +1643,9 @@ class MainWindow(QMainWindow):
         self._selection_appliquee()
 
     def _on_motion(self, cam_id: str, actif: bool):
+        if actif and not self._act_motion.isChecked():
+            return      # événement livré après désactivation (signal queued d'un
+                        # thread de tirage encore en vol) : ne pas surligner
         if actif:
             self._motion_ids.add(cam_id)
         else:
@@ -1362,6 +1766,17 @@ class MainWindow(QMainWindow):
             self._save_timer.stop()
             if self._remote is None:          # jamais la projection serveur
                 save_config(self._cfg)
-        self._leave_mono()
-        self._vider_grille()
+        # fermeture : libération SYNCHRONE (le processus s'arrête juste après,
+        # la libération en arrière-plan de dispose() n'aurait pas le temps)
+        if self._mono_tile is not None:
+            self._mono_tile.shutdown()
+            self._mono_tile = None
+        for tile in self._tiles.values():
+            tile.shutdown()
+        self._tiles.clear()
+        # attend (borné) les libérations mpv lancées par des dispose() récents :
+        # sortir du process pendant un terminate() laissait mpv en course avec
+        # la destruction des fenêtres natives
+        from .tile import attendre_liberations
+        attendre_liberations(5.0)
         super().closeEvent(event)

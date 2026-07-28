@@ -39,3 +39,14 @@ __pycache__/
 .venv/
 venv/
 _diag/
+# Added by code-review-graph
+.code-review-graph/
+
+# Configs outils IA locaux (chemins machine, jamais publiés)
+.mcp.json
+.claude/
+CLAUDE.md
+
+# Diffs / patchs de travail locaux
+*.diff
+*.patch
