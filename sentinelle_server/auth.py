@@ -8,8 +8,22 @@ Sécurité :
     aussitôt toutes les sessions existantes, et un jeton volé cesse d'être
     valable après SENTINELLE_TOKEN_TTL_H heures — le tout sans stockage de
     session côté serveur ;
-  - droits par utilisateur : rôle (admin | user), accès à tout ou à une liste
-    de sites / caméras. Le rôle admin donne la gestion + la visibilité totale.
+  - droits par utilisateur : rôle (admin | user | service), accès à tout ou à
+    une liste de sites / caméras. Le rôle admin donne la gestion + la visibilité
+    totale.
+
+Le rôle « service » est destiné aux consommateurs machine (analyse vidéo,
+enregistreur) qui lisent les flux en continu :
+  - son jeton relay N'EXPIRE PAS. Ces programmes tournent des mois sans
+    surveillance et leur bibliothèque RTSP traite souvent un 401 comme une
+    panne définitive : une expiration les rendrait aveugles en silence. La
+    contrepartie est que la révocation devient le seul moyen de le couper —
+    d'où jetons_version, qui invalide un jeton perpétuel instantanément.
+  - il ne voit JAMAIS tout : `tout` est forcé à faux, seuls les sites et
+    caméras explicitement accordés lui sont visibles ;
+  - son jeton d'API, lui, garde la durée globale et n'ouvre qu'une poignée de
+    points de lecture (voir SERVICE_OK dans app.py) : ni administration, ni
+    PTZ, ni changement de mot de passe.
 
 Le fichier users.yaml vit dans le dossier de données du serveur (jamais publié).
 """
@@ -31,6 +45,13 @@ _ITERATIONS = 200_000
 
 # Longueur minimale imposée à tout nouveau mot de passe (login + admin).
 MIN_MDP = 8
+
+ROLES = ("admin", "user", "service")
+
+# Expiration d'un jeton perpétuel (compte de service, portée relay uniquement).
+# La signature couvre exp : seul le serveur peut émettre ce 0, il n'est donc pas
+# forgeable en tronquant un jeton existant.
+SANS_EXPIRATION = 0
 
 # Portées de jeton : un jeton « api » ouvre l'API HTTP (visualisation +
 # administration selon le rôle) ; un jeton « relay » ne sert QUE de mot de passe
@@ -88,10 +109,11 @@ class User:
                  sites: list | None = None, cameras: list | None = None,
                  sequences: list | None = None, jetons_version: int = 0):
         self.username = username
-        self.role = role if role in ("admin", "user") else "user"
+        self.role = role if role in ROLES else "user"
         self.sel = sel
         self.hash = hash
-        self.tout = bool(tout)
+        # un compte de service ne voit que ce qu'on lui accorde nommément
+        self.tout = bool(tout) and self.role != "service"
         self.sites = list(sites or [])
         self.cameras = list(cameras or [])
         self.sequences = list(sequences or [])   # boucles personnelles (dicts)
@@ -104,6 +126,10 @@ class User:
     @property
     def admin(self) -> bool:
         return self.role == "admin"
+
+    @property
+    def service(self) -> bool:
+        return self.role == "service"
 
     def peut_voir(self, cam) -> bool:
         if self.admin or self.tout:
@@ -176,17 +202,30 @@ class Users:
     # ------------------------------------------------------------------- jetons
     #
     # Format : b64(username).scope.exp.signature  où exp est un horodatage Unix
-    # et la signature couvre username + empreinte du mot de passe + version de
-    # session + portée + exp. Rend le jeton invalide : changer le mot de passe
-    # (hash), incrémenter jetons_version (révocation), dépasser exp, ou présenter
-    # le jeton dans une portée qui n'est pas la sienne.
+    # (ou SANS_EXPIRATION) et la signature couvre username + empreinte du mot de
+    # passe + version de session + portée + exp. Rend le jeton invalide :
+    # changer le mot de passe (hash), incrémenter jetons_version (révocation),
+    # dépasser exp, ou présenter le jeton dans une portée qui n'est pas la
+    # sienne.
 
     def _signature(self, user: User, scope: str, exp: int) -> str:
         msg = f"{user.username}:{user.hash}:{user.jetons_version}:{scope}:{exp}".encode()
         return _b64(hmac.new(self.secret, msg, hashlib.sha256).digest())
 
+    @staticmethod
+    def _perpetuel(user: User, scope: str) -> bool:
+        """Seule combinaison sans expiration : compte de service, portée relay.
+        La portée api d'un compte de service garde la durée globale — un jeton
+        d'API perpétuel exfiltré resterait exploitable indéfiniment."""
+        return user.service and scope == SCOPE_RELAY
+
+    def duree_jeton(self, user: User, scope: str = SCOPE_API) -> int:
+        """Durée de vie applicable, en secondes. 0 = pas d'expiration."""
+        return 0 if self._perpetuel(user, scope) else _ttl_s()
+
     def emettre_jeton(self, user: User, scope: str = SCOPE_API) -> str:
-        exp = int(time.time()) + _ttl_s()
+        duree = self.duree_jeton(user, scope)
+        exp = SANS_EXPIRATION if duree == 0 else int(time.time()) + duree
         return (f"{_b64(user.username.encode())}.{scope}.{exp}."
                 f"{self._signature(user, scope, exp)}")
 
@@ -201,22 +240,31 @@ class Users:
             exp = int(exp_s)
         except Exception:
             return None
-        if exp < time.time():
-            return None                         # jeton expiré
         user = self.users.get(username)
         if user is None:
             return None
+        # signature vérifiée AVANT d'interpréter exp : sans elle, un exp forgé à
+        # SANS_EXPIRATION ne serait qu'une chaîne à recopier
         if not hmac.compare_digest(sig, self._signature(user, scope, exp)):
             return None
+        if exp == SANS_EXPIRATION:
+            # perpétuel accepté pour la seule combinaison qui l'émet ; un compte
+            # de service redevenu simple utilisateur perd donc ses jetons
+            return user if self._perpetuel(user, scope) else None
+        if exp < time.time():
+            return None                         # jeton expiré
         return user
 
     def reste_jeton(self, jeton: str) -> int:
-        """Secondes restant avant expiration (0 si absent/illisible). Ne
-        revérifie pas la signature : à n'appeler qu'après user_du_jeton."""
+        """Secondes restant avant expiration (0 si absent/illisible, -1 si le
+        jeton n'expire pas). Ne revérifie pas la signature : à n'appeler
+        qu'après user_du_jeton."""
         try:
             exp = int(jeton.split(".", 3)[2])
         except (IndexError, ValueError):
             return 0
+        if exp == SANS_EXPIRATION:
+            return -1
         return max(0, exp - int(time.time()))
 
     def revoquer_sessions(self, username: str) -> bool:
@@ -263,7 +311,8 @@ class Users:
 
         Chaque entrée : username, role, tout, sites, cameras, et password
         optionnel (vide = conserver le mot de passe existant). Retourne les
-        avertissements de validation. Garantit au moins un admin subsistant."""
+        avertissements de validation. Garantit au moins un admin subsistant —
+        un compte de service ne peut pas tenir ce rôle."""
         avertissements = []
         nouveaux: dict[str, User] = {}
         for e in entrees:
@@ -275,6 +324,14 @@ class Users:
                 avertissements.append(f"doublon '{nom}' ignoré")
                 continue
             role = str(e.get("role", "user"))
+            if role not in ROLES:
+                avertissements.append(f"'{nom}' : rôle '{role}' inconnu — "
+                                      f"ramené à utilisateur")
+                role = "user"
+            if role == "service" and e.get("tout"):
+                avertissements.append(f"'{nom}' : un compte de service ne peut "
+                                      f"pas voir toutes les caméras — restreint "
+                                      f"aux sites et caméras accordés")
             ancien = self.users.get(nom)
             mdp = e.get("password") or ""
             if mdp and len(mdp) < MIN_MDP:

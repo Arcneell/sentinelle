@@ -8,6 +8,7 @@ sans gêner les tests.
 """
 
 import os
+import time
 
 import yaml
 from fastapi.testclient import TestClient
@@ -320,6 +321,184 @@ def test_anti_force_brute_changement_mdp(tmp_path):
         r = c.post("/api/account/password", headers=A,
                    json={"ancien": "faux", "nouveau": "assez-long-1"})
         assert r.status_code == 429 and "Retry-After" in r.headers
+
+
+def test_streams_compte_de_service(tmp_path):
+    """Consommateur machine (analyse vidéo) : /api/streams donne des URLs RTSP
+    prêtes à l'emploi, limitées aux caméras autorisées, et le jeton relay d'un
+    compte de service n'expire pas — son jeton d'API, si."""
+    from sentinelle_server.auth import SANS_EXPIRATION, _ttl_s
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        tok = c.post("/api/login", json={"username": "admin", "password": mdp}).json()["token"]
+        A = {"Authorization": f"Bearer {tok}"}
+
+        users = c.get("/api/users", headers=A).json()["users"]
+        svc = {"username": "vision", "role": "service", "tout": False,
+               "sites": ["s1"], "cameras": [], "password": "vision-ai-1"}
+        aveugle = {"username": "aveugle", "role": "service", "tout": False,
+                   "sites": [], "cameras": [], "password": "aveugle-1"}
+        r = c.put("/api/users", headers=A, json={"users": users + [svc, aveugle]})
+        assert r.status_code == 200
+
+        rep = c.post("/api/login", json={"username": "vision",
+                                         "password": "vision-ai-1"}).json()
+        assert rep["role"] == "service"
+        S = {"Authorization": f"Bearer {rep['token']}"}
+
+        # portée api : durée GLOBALE malgré le rôle (un jeton d'API perpétuel
+        # exfiltré resterait exploitable indéfiniment)
+        reste = c.get("/api/session", headers=S).json()["reste_s"]
+        assert 0 < reste <= _ttl_s()
+        # portée relay : perpétuelle
+        assert int(rep["relay_token"].split(".")[2]) == SANS_EXPIRATION
+
+        flux = c.get("/api/streams", headers=S).json()
+        assert flux["expire_s"] == 0                    # 0 = n'expire pas
+        assert flux["relay"]["port"] == 8554
+        assert [s["camera"] for s in flux["streams"]] == ["cam1"]
+        cam = flux["streams"][0]
+        assert cam["site"] == "s1" and cam["nom"] == "Caméra 1"
+
+        # les URLs pointent le relais, portent le jeton relay en mot de passe et
+        # le chemin attendu — et elles sont réellement acceptées par le relais
+        for vue in ("main", "sub"):
+            assert cam[vue].startswith("rtsp://vision:")
+            assert cam[vue].endswith(f":8554/cam1-{vue}")
+        jeton_url = cam["main"].split(":", 2)[2].split("@")[0]
+        for vue in ("main", "sub"):
+            assert c.post("/api/relay-auth",
+                          json={"action": "read", "path": f"cam1-{vue}",
+                                "password": jeton_url}).status_code == 200
+        # le jeton des URLs reste cloisonné : refusé en Bearer sur l'API
+        assert c.get("/api/streams",
+                     headers={"Authorization": f"Bearer {jeton_url}"}).status_code == 401
+
+        # un compte sans droit ne reçoit aucune URL
+        ta = c.post("/api/login", json={"username": "aveugle",
+                                        "password": "aveugle-1"}).json()["token"]
+        assert c.get("/api/streams",
+                     headers={"Authorization": f"Bearer {ta}"}).json()["streams"] == []
+
+
+def test_service_droits_limites(tmp_path):
+    """Un compte de service ne voit que ce qu'on lui accorde et n'atteint que
+    les points de lecture : ni administration, ni PTZ, ni mot de passe, ni
+    config du mur d'images."""
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        tok = c.post("/api/login", json={"username": "admin", "password": mdp}).json()["token"]
+        A = {"Authorization": f"Bearer {tok}"}
+        users = c.get("/api/users", headers=A).json()["users"]
+        # « tout » demandé pour un compte de service : refusé et signalé
+        svc = {"username": "vision", "role": "service", "tout": True,
+               "sites": ["s1"], "cameras": [], "password": "vision-ai-1"}
+        r = c.put("/api/users", headers=A, json={"users": users + [svc]})
+        assert r.status_code == 200
+        assert any("service" in w for w in r.json()["warnings"])
+        stocke = next(u for u in c.get("/api/users", headers=A).json()["users"]
+                      if u["username"] == "vision")
+        assert stocke["role"] == "service" and stocke["tout"] is False
+
+        S = {"Authorization": "Bearer " + c.post(
+            "/api/login", json={"username": "vision",
+                                "password": "vision-ai-1"}).json()["token"]}
+
+        # ouverts : lecture des flux, session, snapshot, événements
+        assert c.get("/api/streams", headers=S).status_code == 200
+        assert c.get("/api/session", headers=S).status_code == 200
+        assert c.get("/api/snapshot/cam1", headers=S).status_code in (200, 502)
+        # fermés : tout le reste, y compris ce qu'un simple utilisateur peut faire
+        assert c.get("/api/config", headers=S).status_code == 403
+        assert c.put("/api/account/sequences", headers=S,
+                     json={"sequences": []}).status_code == 403
+        assert c.post("/api/account/password", headers=S,
+                      json={"ancien": "vision-ai-1",
+                            "nouveau": "vision-ai-2"}).status_code == 403
+        assert c.post("/api/ptz/cam1/move", headers=S, json={"pan": 1}).status_code == 403
+        assert c.get("/api/users", headers=S).status_code == 403
+        assert c.put("/api/config", headers=S, json=CONFIG).status_code == 403
+
+        # un rôle inconnu retombe sur « utilisateur » plutôt que d'être accepté
+        r = c.put("/api/users", headers=A, json={"users": users + [
+            {"username": "bizarre", "role": "root", "tout": False,
+             "sites": [], "cameras": [], "password": "bizarre-1"}]})
+        assert any("inconnu" in w for w in r.json()["warnings"])
+        assert next(u for u in c.get("/api/users", headers=A).json()["users"]
+                    if u["username"] == "bizarre")["role"] == "user"
+
+
+def test_service_revocation_coupe_le_jeton_perpetuel(tmp_path):
+    """Un jeton relay qui n'expire pas doit rester coupable : la révocation et
+    le changement de mot de passe l'invalident immédiatement. Et un compte
+    rétrogradé perd la perpétuité de ses jetons déjà émis."""
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        tok = c.post("/api/login", json={"username": "admin", "password": mdp}).json()["token"]
+        A = {"Authorization": f"Bearer {tok}"}
+        users = c.get("/api/users", headers=A).json()["users"]
+        svc = {"username": "vision", "role": "service", "tout": False,
+               "sites": ["s1"], "cameras": [], "password": "vision-ai-1"}
+        c.put("/api/users", headers=A, json={"users": users + [svc]})
+
+        def _relay():
+            return c.post("/api/login", json={"username": "vision",
+                                              "password": "vision-ai-1"}).json()["relay_token"]
+
+        lecture = {"action": "read", "path": "cam1-main"}
+        rt = _relay()
+        assert c.post("/api/relay-auth", json={**lecture, "password": rt}).status_code == 200
+
+        # révocation : le jeton perpétuel tombe tout de suite
+        assert c.post("/api/users/vision/revoke", headers=A).status_code == 200
+        assert c.post("/api/relay-auth", json={**lecture, "password": rt}).status_code == 401
+
+        # un jeton perpétuel reste cloisonné : refusé en Bearer sur l'API
+        rt = _relay()
+        assert c.get("/api/streams",
+                     headers={"Authorization": f"Bearer {rt}"}).status_code == 401
+
+        # compte rétrogradé en utilisateur : ses jetons perpétuels meurent
+        svc["role"], svc["password"] = "user", ""
+        c.put("/api/users", headers=A, json={"users": users + [svc]})
+        assert c.post("/api/relay-auth", json={**lecture, "password": rt}).status_code == 401
+        # et le compte redevenu simple utilisateur reçoit un jeton qui expire
+        rep = c.post("/api/login", json={"username": "vision",
+                                         "password": "vision-ai-1"}).json()
+        assert int(rep["relay_token"].split(".")[2]) > int(time.time())
+        assert c.post("/api/relay-auth",
+                      json={**lecture, "password": rep["relay_token"]}).status_code == 200
+        assert c.get("/api/config",
+                     headers={"Authorization": f"Bearer {rep['token']}"}).status_code == 200
+
+
+def test_relay_host_annonce(tmp_path):
+    """relay_host de server.yaml : annoncé dans /api/config et /api/streams ;
+    vide, les clients emploient l'hôte de l'API."""
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        tok = c.post("/api/login", json={"username": "admin", "password": mdp}).json()["token"]
+        A = {"Authorization": f"Bearer {tok}"}
+        assert c.get("/api/config", headers=A).json()["relay"]["host"] == "testserver"
+
+    params = yaml.safe_load((tmp_path / "server.yaml").read_text(encoding="utf-8"))
+    assert params["relay_host"] == ""            # clé créée au premier démarrage
+    params["relay_host"] = "video.exemple.lan"
+    (tmp_path / "server.yaml").write_text(yaml.safe_dump(params), encoding="utf-8")
+
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        tok = c.post("/api/login", json={"username": "admin", "password": mdp}).json()["token"]
+        A = {"Authorization": f"Bearer {tok}"}
+        assert c.get("/api/config", headers=A).json()["relay"]["host"] == "video.exemple.lan"
+        flux = c.get("/api/streams", headers=A).json()
+        assert flux["relay"]["host"] == "video.exemple.lan"
+        assert "@video.exemple.lan:8554/cam1-main" in flux["streams"][0]["main"]
 
 
 def test_anti_force_brute_login(tmp_path):

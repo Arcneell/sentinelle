@@ -44,6 +44,8 @@ _PATHS = {
     "monitor": '<rect x="2" y="3" width="20" height="14" rx="2"/>'
                '<line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
     "lock": '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    "power": '<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>'
+             '<line x1="12" y1="2" x2="12" y2="12"/>',
     "video": '<polygon points="23 7 16 12 23 17 23 7"/>'
              '<rect x="1" y="5" width="15" height="14" rx="2"/>',
     "motion": '<path d="M13 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/>'
