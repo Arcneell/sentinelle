@@ -60,9 +60,9 @@ def test_menu_camera_sans_configuration_en_mode_serveur(tmp_path):
     from sentinelle.ui.main_window import MainWindow
 
     win = MainWindow(str(tmp_path / "config.yaml"))
-    site = Site(id="s1", nom="Vitré", lien="fibre")
+    site = Site(id="s1", nom="Site 1", lien="fibre")
     win._cfg.sites.append(site)
-    win._cfg.cameras.append(Camera(id="c1", nom="Entrée", site=site,
+    win._cfg.cameras.append(Camera(id="c1", nom="Caméra 1", site=site,
                                    marque="dahua", hote="127.0.0.1", canal=1))
     win._peupler_arbre()
     item = win._tree.topLevelItem(0).child(0)
