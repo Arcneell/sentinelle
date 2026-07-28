@@ -50,6 +50,36 @@ def test_fenetre_principale(tmp_path):
     win.close()
 
 
+def test_menu_camera_sans_configuration_en_mode_serveur(tmp_path):
+    """En mode serveur, le clic droit ne propose plus « Configuration… ».
+
+    Le parc est géré sur le serveur : cette entrée n'offrait rien d'utile à un
+    simple utilisateur. Elle reste en mode autonome, où elle édite bien la
+    configuration locale."""
+    from sentinelle.config import Camera, Site
+    from sentinelle.ui.main_window import MainWindow
+
+    win = MainWindow(str(tmp_path / "config.yaml"))
+    site = Site(id="s1", nom="Site 1", lien="fibre")
+    win._cfg.sites.append(site)
+    win._cfg.cameras.append(Camera(id="c1", nom="Caméra 1", site=site,
+                                   marque="dahua", hote="127.0.0.1", canal=1))
+    win._peupler_arbre()
+    item = win._tree.topLevelItem(0).child(0)
+
+    libelles = lambda menu: [a.text() for a in menu.actions()]
+
+    autonome = libelles(win._construire_menu_arbre(item))
+    assert any("Configuration" in t for t in autonome)
+
+    win._remote = object()                    # mode serveur (session factice)
+    serveur = libelles(win._construire_menu_arbre(item))
+    assert not any("Configuration" in t for t in serveur), serveur
+    assert any("Plein écran" in t for t in serveur)
+    win._remote = None
+    win.close()
+
+
 def test_grille_redemarre_apres_mono(tmp_path, monkeypatch):
     """Régression : une tuile conservée d'une étape mono doit repartir quand la
     grille est réaffichée (ne pas rester « en pause »).

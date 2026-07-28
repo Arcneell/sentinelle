@@ -14,12 +14,12 @@ from datetime import datetime
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMenu, QSizePolicy,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QFrame, QLabel, QMenu, QSizePolicy,
+                               QVBoxLayout)
 
 from ..config import Camera, mask_url
 from ..snapshot import fetch_snapshot
-from .tile import _DOT_COLORS, BACKOFF_MAX, TileState
+from .tile import _BEZEL_PX, _BEZEL_TOKENS, BACKOFF_MAX, TileState
 
 logger = logging.getLogger(__name__)
 
@@ -91,18 +91,9 @@ class PhotoTile(QFrame):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self._header = QWidget()
-        h = QHBoxLayout(self._header)
-        h.setContentsMargins(8, 4, 8, 4)
-        self._dot = QLabel()
-        self._dot.setFixedSize(10, 10)
-        self._title = QLabel(f"{self.camera.nom} — {self.camera.site.nom}")
-        self._info = QLabel(f"photo · {self._intervalle}s")
-        h.addWidget(self._dot)
-        h.addWidget(self._title)
-        h.addStretch()
-        h.addWidget(self._info)
-        root.addWidget(self._header)
+        from .widgets import TileCaption
+        self._caption = TileCaption(self.camera.nom, self.camera.site.nom)
+        self._caption.set_data(f"photo · {self._intervalle}s")
 
         self._image = _ImageLabel()
         self._status = QLabel()
@@ -114,6 +105,7 @@ class PhotoTile(QFrame):
         body.addWidget(self._image, 1)
         body.addWidget(self._status)
         root.addLayout(body, 1)
+        root.addWidget(self._caption)          # identité SOUS l'image
         self._status.hide()
 
         self.restyle()
@@ -123,24 +115,20 @@ class PhotoTile(QFrame):
         """(Ré)applique les couleurs du thème courant."""
         from .theme import t
         self._apply_frame_style()
-        self._header.setStyleSheet(f"background-color: {t('tile_header')};")
-        self._title.setStyleSheet(f"color: {t('text')}; font-weight: 600;")
-        self._info.setStyleSheet(f"color: {t('text_dim')};")
+        self._caption.restyle()
         self._status.setStyleSheet(f"color: {t('tile_status_text')}; padding: 8px;")
-        self._dot.setStyleSheet(
-            f"background-color: {_DOT_COLORS[self.state]}; border-radius: 5px;")
 
     def _apply_frame_style(self):
+        """Liseré de largeur constante ; seule sa couleur porte l'état."""
         from .theme import t
-        c = t("danger") if self._motion_on else t("border")
-        w = 3 if self._motion_on else 1
+        c = t("text") if self._motion_on else t(_BEZEL_TOKENS[self.state])
         self.setStyleSheet(
-            f"PhotoTile {{ background-color: {t('tile_bg')}; border: {w}px solid {c}; }}")
+            f"PhotoTile {{ background-color: {t('tile_bg')}; "
+            f"border: {_BEZEL_PX}px solid {c}; }}")
 
     def _set_state(self, state: TileState, message: str = ""):
         self.state = state
-        self._dot.setStyleSheet(
-            f"background-color: {_DOT_COLORS[state]}; border-radius: 5px;")
+        self._apply_frame_style()
         if message and state != TileState.PLAYING:
             self._status.setText(message)
             self._status.show()
@@ -155,6 +143,7 @@ class PhotoTile(QFrame):
     def set_motion(self, actif: bool):
         self._motion_on = actif
         self._apply_frame_style()
+        self._caption.alerte(actif)
 
     def contextMenuEvent(self, event):
         from .icons import icon
@@ -244,8 +233,8 @@ class PhotoTile(QFrame):
                 self._failures = 0
                 self.debit_bps = len(data) * 8 / self._intervalle
                 self._image.set_image(pixmap)
-                self._info.setText(f"photo · {self._intervalle}s · "
-                                   f"{datetime.now().strftime('%H:%M:%S')}")
+                self._caption.set_data(f"photo · {self._intervalle}s · "
+                                       f"{datetime.now().strftime('%H:%M:%S')}")
                 self._set_state(TileState.PLAYING)
                 self._timer.start(self._intervalle * 1000)
                 return

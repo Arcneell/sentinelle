@@ -13,9 +13,11 @@ from .theme import t
 
 _DUREE_MS = 3500
 
+# « info » est achromatique : une confirmation neutre n'a rien à disputer à
+# l'ambre et au rouge des tuiles.
 _GENRES = {
     "ok": ("check-circle", "ok"),
-    "info": ("check-circle", "accent"),
+    "info": ("check-circle", "text_dim"),
     "alerte": ("alert", "warn"),
 }
 
@@ -46,7 +48,7 @@ class _Toast(QFrame):
         self._texte.setText(texte)
         self.setStyleSheet(
             f"QFrame#toast {{ background: {t('elevated')}; "
-            f"border: 1px solid {t('border')}; border-radius: 8px; }}"
+            f"border: 1px solid {t('border')}; border-radius: 3px; }}"
             f"QLabel {{ color: {t('text')}; font-size: 13px; background: transparent; }}")
         self.adjustSize()
         self._replacer()

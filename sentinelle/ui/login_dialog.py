@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout)
 
 from .icons import app_icon
-from .theme import t
+from .theme import police_etiquette, t
 
 
 class LoginDialog(QDialog):
@@ -39,10 +39,12 @@ class LoginDialog(QDialog):
         pix = app_icon().pixmap(84, 84)
         logo.setPixmap(pix)
 
-        marque = QLabel("SENTINELLE")
+        marque = QLabel("Sentinelle")
         marque.setAlignment(Qt.AlignCenter)
-        marque.setStyleSheet(f"color: {t('text')}; font-size: 22px; "
-                             f"font-weight: 700; letter-spacing: 4px;")
+        # l'interlettrage passe par la police : Qt n'applique pas
+        # « letter-spacing » en feuille de style
+        marque.setFont(police_etiquette(22, suivi=20))
+        marque.setStyleSheet(f"color: {t('text')};")
         sous_titre = QLabel("Connexion au serveur de vidéosurveillance")
         sous_titre.setAlignment(Qt.AlignCenter)
         sous_titre.setStyleSheet(f"color: {t('text_dim')}; font-size: 13px;")
@@ -50,7 +52,7 @@ class LoginDialog(QDialog):
         # --- champs ---
         champ_css = (f"QLineEdit {{ background: {t('surface_alt')}; "
                      f"color: {t('text')}; border: 1px solid {t('border')}; "
-                     f"border-radius: 8px; padding: 11px 14px; font-size: 14px; }}"
+                     f"border-radius: 3px; padding: 11px 14px; font-size: 14px; }}"
                      f"QLineEdit:focus {{ border-color: {t('accent')}; }}")
         self._user = QLineEdit(username)
         self._user.setPlaceholderText("Identifiant")
@@ -75,7 +77,7 @@ class LoginDialog(QDialog):
         self._btn.setCursor(Qt.PointingHandCursor)
         self._btn.setStyleSheet(
             f"QPushButton {{ background: {t('accent')}; color: {t('on_accent')}; "
-            f"border: none; border-radius: 8px; padding: 12px; font-size: 14px; "
+            f"border: none; border-radius: 3px; padding: 12px; font-size: 14px; "
             f"font-weight: 600; text-align: center; }}"
             f"QPushButton:hover {{ background: {t('accent_hover')}; }}"
             f"QPushButton:disabled {{ background: {t('elevated')}; "

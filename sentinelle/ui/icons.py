@@ -119,4 +119,4 @@ def app_icon() -> QIcon:
             ic = QIcon(str(p))
             if not ic.isNull():
                 return ic
-    return icon("video", "#2a82da")
+    return icon("video", "#e7eaec")

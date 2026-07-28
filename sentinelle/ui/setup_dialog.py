@@ -23,7 +23,7 @@ class _Carte(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet(
             f"QFrame#carteSetup {{ background: {t('surface')}; "
-            f"border: 1px solid {t('border')}; border-radius: 10px; }}"
+            f"border: 1px solid {t('border')}; border-radius: 3px; }}"
             f"QFrame#carteSetup:hover {{ border-color: {t('accent')}; "
             f"background: {t('surface_alt')}; }}")
         lay = QVBoxLayout(self)

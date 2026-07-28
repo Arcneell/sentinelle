@@ -513,3 +513,61 @@ def test_anti_force_brute_login(tmp_path):
         r = c.post("/api/login", json={"username": "admin", "password": "faux"})
         assert r.status_code == 429
         assert "Retry-After" in r.headers
+
+
+def test_conduite_serveur_reservee_aux_admins(tmp_path):
+    """État, journal, rechargement et redémarrage : administrateurs seulement.
+
+    Le redémarrage n'est pas déclenché ici (il tuerait le processus de test) :
+    on vérifie qu'un simple utilisateur est refusé sur les quatre points."""
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        tok = c.post("/api/login", json={"username": "admin", "password": mdp}).json()["token"]
+        A = {"Authorization": f"Bearer {tok}"}
+
+        users = c.get("/api/users", headers=A).json()["users"]
+        v = {"username": "v", "role": "user", "tout": False,
+             "sites": ["s1"], "cameras": [], "password": "viewer-1"}
+        assert c.put("/api/users", headers=A, json={"users": users + [v]}).status_code == 200
+        tv = c.post("/api/login", json={"username": "v", "password": "viewer-1"}).json()["token"]
+        V = {"Authorization": f"Bearer {tv}"}
+
+        for methode, chemin in (("get", "/api/server/status"),
+                                ("get", "/api/server/logs"),
+                                ("post", "/api/server/reload"),
+                                ("post", "/api/server/restart")):
+            r = getattr(c, methode)(chemin, headers=V)
+            assert r.status_code == 403, f"{chemin} ouvert à un simple utilisateur"
+
+        etat = c.get("/api/server/status", headers=A).json()
+        assert etat["cameras"] == 1 and etat["sites"] == 1
+        assert etat["comptes"] == {"admin": 1, "user": 1, "service": 0}
+        assert etat["uptime_s"] >= 0 and etat["version"]
+
+        journal = c.get("/api/server/logs", headers=A, params={"lignes": 50}).json()
+        assert isinstance(journal["lignes"], list)
+
+
+def test_rechargement_prend_en_compte_le_fichier_modifie(tmp_path):
+    """Une caméra ajoutée dans config.yaml sur le serveur apparaît après
+    /api/server/reload, sans redémarrage."""
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        mdp = _mdp_admin_initial(tmp_path)
+        tok = c.post("/api/login", json={"username": "admin", "password": mdp}).json()["token"]
+        A = {"Authorization": f"Bearer {tok}"}
+        assert len(c.get("/api/config", headers=A).json()["cameras"]) == 1
+
+        cfg = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+        cfg["cameras"].append({
+            "id": "cam2", "nom": "Caméra 2", "site": "s1", "profil": "eco",
+            "marque": "dahua", "hote": "127.0.0.2", "port": 554, "canal": 2,
+            "port_http": 9, "user": "u", "password": "p",
+        })
+        (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+        r = c.post("/api/server/reload", headers=A).json()
+        assert r["ok"] is True and r["cameras"] == 2
+        assert [x["id"] for x in c.get("/api/config", headers=A).json()["cameras"]] \
+            == ["cam1", "cam2"]
