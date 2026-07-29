@@ -321,6 +321,13 @@ class MainWindow(QMainWindow):
         boîte d'erreur en cas d'échec. Un seul appel à la fois (les actions qui
         l'utilisent sont déclenchées depuis des dialogues modaux)."""
         from PySide6.QtCore import Qt as _Qt
+        if self._reseau_en_cours:
+            # un appel est déjà en vol : le second écrasait le rappel du premier
+            # (résultat livré au mauvais destinataire) et empilait un second
+            # curseur d'attente que le seul restore() suivant ne défaisait pas —
+            # fenêtre désactivée en apparence gelée.
+            return
+        self._reseau_en_cours = True
         self._reseau_on_ok = on_ok
         self._reseau_titre = titre
         self.setEnabled(False)
@@ -354,6 +361,9 @@ class MainWindow(QMainWindow):
         self.setEnabled(True)
         on_ok, titre = self._reseau_on_ok, self._reseau_titre
         self._reseau_on_ok = None
+        # levé AVANT on_ok : le rappel ouvre un dialogue modal (administration),
+        # dont la boucle d'événements doit pouvoir relancer un appel serveur
+        self._reseau_en_cours = False
         if err:
             QMessageBox.warning(self, titre, f"Serveur injoignable :\n{err}")
             return
@@ -725,6 +735,7 @@ class MainWindow(QMainWindow):
         self._reseau_resultat.connect(self._on_reseau_resultat)
         self._reseau_on_ok = None
         self._reseau_titre = ""
+        self._reseau_en_cours = False        # un appel générique est en vol
 
     def _tbtn(self, nom_icone: str, texte: str, tooltip: str, slot,
               checkable: bool = False) -> QToolButton:

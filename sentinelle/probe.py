@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,10 @@ def classify_text(text: str) -> str:
     return "other"
 
 
+@lru_cache(maxsize=1)
 def ffprobe_available() -> bool:
+    """Présence de ffprobe. Mise en cache : la tuile l'appelle sur le thread UI
+    à chaque échec de flux, et `which` parcourt tout le PATH."""
     return shutil.which("ffprobe") is not None
 
 
