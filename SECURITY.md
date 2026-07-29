@@ -1,48 +1,37 @@
-# Politique de sécurité
-
-## Versions prises en charge
-
-Les correctifs de sécurité sont publiés pour la dernière version en date. Le projet
-n'entretient pas de branches de maintenance : mettre à jour vers la
-[version la plus récente](https://github.com/Arcneell/sentinelle/releases) est la voie
-recommandée.
+# Sécurité
 
 ## Signaler une vulnérabilité
 
-**Ne pas ouvrir d'issue publique.** Utiliser le signalement privé de GitHub :
-onglet **Security** du dépôt, puis *Report a vulnerability*
+Pas d'issue publique. Utiliser le signalement privé de GitHub : onglet Security du dépôt,
+*Report a vulnerability*
 ([lien direct](https://github.com/Arcneell/sentinelle/security/advisories/new)). Le rapport
-n'est visible que des mainteneurs jusqu'à la publication du correctif.
+n'est visible que des mainteneurs jusqu'au correctif.
 
-Un rapport utile contient : la version concernée, le mode de déploiement (autonome ou
-serveur central), la description de la faille, les étapes pour la reproduire, et l'impact
-estimé. Retirer les identifiants, jetons et adresses réels des traces jointes au rapport.
+Indiquer la version, le mode de déploiement, la description de la faille, les étapes de
+reproduction et l'impact estimé. Retirer les identifiants, jetons et adresses réels des
+traces jointes.
 
-Réponse sous quelques jours. Le projet est maintenu sur du temps limité : une faille
-critique passe avant tout le reste, une faille mineure peut attendre la prochaine version.
-Le correctif publié crédite la personne qui a signalé, sauf demande contraire.
+Réponse sous quelques jours. Les correctifs sortent dans la dernière version en date ; il n'y
+a pas de branche de maintenance. Le correctif crédite la personne qui a signalé, sauf demande
+contraire.
 
 ## Périmètre
 
-Font partie du périmètre : l'API du serveur central et son modèle de droits, la validation
-de l'autorisation au relais, le stockage et la transmission des identifiants
-d'enregistreurs, la gestion des jetons de session et de flux, et le client de bureau.
+Concerné : l'API du serveur et son modèle de droits, l'autorisation au relais, le stockage et
+la transmission des identifiants d'enregistreurs, les jetons de session et de flux, le client
+de bureau.
 
-N'en font pas partie : les vulnérabilités des caméras et enregistreurs eux-mêmes, ni celles
-de MediaMTX, Qt, mpv ou des autres dépendances — à signaler à leurs projets respectifs,
-sauf si Sentinelle les expose d'une manière qui leur est propre.
+Hors périmètre : les failles des caméras et enregistreurs, et celles de MediaMTX, Qt, mpv ou
+des autres dépendances, à signaler à leurs projets respectifs.
 
-## Attentes de déploiement connues
+## Comportements assumés
 
-Ces points sont documentés et assumés, ce ne sont pas des vulnérabilités :
+Documentés, ce ne sont pas des vulnérabilités :
 
-- **L'API parle HTTP en clair.** Le serveur est prévu pour un réseau de confiance ou un
-  VPN ; une surcouche Caddy est fournie pour terminer le TLS
-  (`deploy/docker-compose.tls.yml`).
-- **Les mots de passe du `config.yaml` client sont obscurcis, pas chiffrés.** La clé est
-  embarquée dans l'application : cela empêche une lecture de passage, rien de plus. Un
-  compte d'enregistreur en lecture seule est recommandé.
-- **La réponse de `GET /api/streams` est un secret** : elle contient un jeton de relais
-  valide, en clair, dans les URL RTSP.
-- **Les comptes de rôle Service reçoivent un jeton de flux sans expiration**, par
-  conception. La révocation (*Déconnecter partout*) est le moyen de le couper.
+- l'API parle HTTP en clair, à déployer derrière un VPN ou la surcouche Caddy fournie
+  (`deploy/docker-compose.tls.yml`) ;
+- les mots de passe du `config.yaml` client sont obscurcis avec une clé embarquée, pas
+  chiffrés : préférer un compte d'enregistreur en lecture seule ;
+- la réponse de `GET /api/streams` contient un jeton de relais en clair dans les URL RTSP ;
+- les comptes de rôle Service reçoivent un jeton de flux sans expiration ; la révocation
+  (*Déconnecter partout*) est le moyen de le couper.
