@@ -571,3 +571,31 @@ def test_rechargement_prend_en_compte_le_fichier_modifie(tmp_path):
         assert r["ok"] is True and r["cameras"] == 2
         assert [x["id"] for x in c.get("/api/config", headers=A).json()["cameras"]] \
             == ["cam1", "cam2"]
+
+
+def test_aucun_thread_ne_survit_a_l_application(tmp_path):
+    """L'arrêt de l'application ne doit laisser NI thread de synchronisation du
+    relais NI thread de mouvement.
+
+    Le thread de retries du relais vivait tentatives × delai (trois minutes) même
+    après la fermeture du TestClient : la suite finissait avec des dizaines de
+    threads en vol, qui faisaient des requêtes pendant les tests d'interface Qt
+    (segfaults intermittents en intégration continue)."""
+    import threading
+
+    avant = {t.name for t in threading.enumerate()}
+    app = _client(tmp_path)
+    with TestClient(app) as c:
+        assert c.get("/api/health").json()["ok"] is True
+        pendant = {t.name for t in threading.enumerate()}
+        assert any(n.startswith("relay-sync") for n in pendant), pendant
+
+    # le join de stop() borne l'attente ; laisser un peu d'air aux threads de
+    # mouvement, qui sortent de leur requête ONVIF en cours
+    fin = time.time() + 5
+    while time.time() < fin:
+        restants = {t.name for t in threading.enumerate()} - avant
+        if not any(n.startswith(("relay-sync", "motion-")) for n in restants):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"threads survivants : {sorted(restants)}")

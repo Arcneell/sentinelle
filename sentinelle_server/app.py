@@ -131,6 +131,7 @@ def create_app(data_dir: str | None = None) -> FastAPI:
                     f"{len(store.users.users)} compte(s)")
         yield
         monitor.stop()
+        relay.stop()          # sinon le thread de retries survit à l'application
 
     app = FastAPI(title="Sentinelle Server", version=__version__, lifespan=lifespan)
 
@@ -794,6 +795,7 @@ def create_app(data_dir: str | None = None) -> FastAPI:
             # laisse la réponse HTTP partir avant de couper
             time.sleep(0.4)
             monitor.stop()
+            relay.stop()
             # SIGTERM : uvicorn ferme proprement ses connexions, le processus
             # sort, puis la politique de redémarrage du conteneur le relance.
             # Sous Windows (poste de développement) SIGTERM n'existe pas :

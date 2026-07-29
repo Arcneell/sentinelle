@@ -103,6 +103,13 @@ class MotionMonitor:
             self._arreter_cam(cam_id)
         with self._lock:
             self._actifs.clear()
+        # le thread de retombée sort sur _fini : le repasser à None pour qu'un
+        # surveiller() ultérieur en recrée un (sinon le champ restait non nul
+        # alors que le thread était mort — plus aucune retombée automatique)
+        if self._checker is not None:
+            self._checker.join(timeout=2)
+            self._checker = None
+        self._fini.clear()
 
     def _arreter_cam(self, cam_id: str):
         ev = self._stops.pop(cam_id, None)
