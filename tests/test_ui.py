@@ -80,6 +80,60 @@ def test_menu_camera_sans_configuration_en_mode_serveur(tmp_path):
     win.close()
 
 
+def test_appels_mpv_jamais_sur_le_thread_ui():
+    """Régression : un flux RTSP figé ne doit plus geler l'interface.
+
+    Toute commande / lecture de propriété libmpv entre dans le cœur de mpv, qui
+    peut être bloqué en lecture réseau (network_timeout=15 s). Appelées depuis
+    le thread Qt, elles gelaient toute la fenêtre — et une page ouverte
+    par-dessus (administration) restait blanche. Elles partent maintenant sur le
+    thread mpv de la tuile."""
+    import threading
+    import time
+
+    from sentinelle.config import Camera, Site
+    from sentinelle.ui.tile import TileState, VideoTile
+
+    class LecteurFige:
+        """Lecteur dont chaque appel bloque, comme mpv sur un flux mort."""
+
+        def __init__(self):
+            self.appele = threading.Event()
+
+        def _bloquer(self, *_a, **_k):
+            self.appele.set()
+            time.sleep(1.0)
+
+        command = _bloquer
+        play = _bloquer
+        __setitem__ = _bloquer
+
+        @property
+        def cache_speed(self):
+            self._bloquer()
+            return 0
+
+    site = Site(id="s1", nom="S", lien="fibre")
+    cam = Camera(id="c1", nom="C1", site=site, marque="hikvision",
+                 hote="127.0.0.1", canal=1)
+    tile = VideoTile(cam, "grille")
+    lecteur = LecteurFige()
+    tile._player = lecteur
+    tile.state = TileState.PLAYING
+
+    t0 = time.perf_counter()
+    tile.stop()                               # command("stop") : bloquant
+    tile.state = TileState.PLAYING
+    tile._update_debit()                      # lecture de cache-speed : bloquante
+    tile.set_aspect_mode("crop")
+    tile._set_zoom(1.0)
+    ecoule = time.perf_counter() - t0
+
+    assert ecoule < 0.3, f"thread UI bloqué {ecoule:.2f}s par libmpv"
+    assert lecteur.appele.wait(3), "l'appel mpv n'a pas été exécuté"
+    tile.deleteLater()
+
+
 def test_grille_redemarre_apres_mono(tmp_path, monkeypatch):
     """Régression : une tuile conservée d'une étape mono doit repartir quand la
     grille est réaffichée (ne pas rester « en pause »).

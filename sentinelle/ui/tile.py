@@ -8,6 +8,13 @@ Machine d'états (patterns repris de vision-ai/capture.py) :
 
 Chaque tuile a sa propre instance libmpv (thread mpv indépendant) : un flux qui
 meurt n'affecte jamais les autres tuiles.
+
+RÈGLE ABSOLUE : aucun appel à libmpv depuis le thread Qt. Toute commande et
+toute lecture de propriété entre dans le cœur de mpv, qui peut être bloqué dans
+une lecture réseau sur un flux figé (network_timeout=15 s, courant sur un site
+4G). Un simple `stop` ou une lecture de débit gelait alors TOUTE l'interface —
+et une page ouverte par-dessus (administration, configuration) restait blanche
+et inerte. Tout passe donc par le thread FIFO de la tuile (voir `_mpv_appel`).
 """
 
 import logging
@@ -43,8 +50,9 @@ BACKOFF_FACTOR = 2
 # 4 = ERROR restent des échecs à reconnecter.
 _ENDFILE_BENIN = (2, 3)
 
-# threads de libération mpv encore en vol (voir VideoTile.dispose) : joints à la
-# fermeture de l'application pour ne pas tuer un terminate() en plein démontage
+# threads mpv chargés d'une libération encore en vol (voir _liberer_player) :
+# joints à la fermeture de l'application pour ne pas tuer un terminate() en
+# plein démontage
 _liberations_lock = threading.Lock()
 _liberations: set = set()
 
@@ -189,6 +197,8 @@ class VideoTile(QFrame):
     _evt_ended = Signal(int, int)           # génération, reason (code libmpv)
     _probe_done = Signal(int, str, str)     # génération, kind, detail
     _libere = Signal()                      # terminate() mpv fini (dispose)
+    _debit_lu = Signal(int, float)           # génération, bits/s (lus hors UI)
+    _hwdec_lu = Signal(str)                  # mode de décodage réel (lu hors UI)
 
     def __init__(self, camera: Camera, vue: str, parent=None):
         super().__init__(parent)
@@ -208,6 +218,9 @@ class VideoTile(QFrame):
         self._ptz_queue = None              # file FIFO : Stop suit toujours Move
         self._ptz_thread = None
         self._ptz_moving = False
+        self._mpv_queue = None              # file FIFO des appels libmpv (hors UI)
+        self._mpv_thread = None
+        self._debit_en_vol = False          # une lecture de débit est déjà en file
         self._aspect_mode = "fit"            # fit | crop | stretch
         self._motion_on = False              # surlignage « mouvement détecté »
         self._controls = None
@@ -235,6 +248,77 @@ class VideoTile(QFrame):
         self._evt_playing.connect(self._on_playing)
         self._evt_ended.connect(self._on_ended)
         self._probe_done.connect(self._on_probe_done)
+        self._debit_lu.connect(self._on_debit_lu)
+        self._hwdec_lu.connect(self._on_hwdec_lu)
+
+    # --------------------------------------------------- appels libmpv (hors UI)
+    #
+    # Un seul thread par tuile, en FIFO : l'ordre des commandes est conservé
+    # (un « stop » ne peut pas devancer le « loadfile » qu'il annule) et le
+    # handle mpv n'est plus jamais utilisé après son terminate(), qui est le
+    # dernier travail de la file. Voir l'en-tête du module pour le pourquoi.
+
+    def _mpv_appel(self, travail):
+        """Empile un appel libmpv sur le thread mpv de la tuile."""
+        if self._mpv_queue is None:
+            import queue
+            q = self._mpv_queue = queue.Queue()
+            cam_id = self.camera.id         # jamais `self` dans le thread : la
+                                            # tuile peut être détruite avant lui
+
+            def worker():
+                while True:
+                    job = q.get()
+                    if job is None:
+                        return
+                    try:
+                        job()
+                    except Exception as e:
+                        logger.debug(f"[{cam_id}] appel mpv ignoré : {e}")
+
+            self._mpv_thread = threading.Thread(target=worker, daemon=True,
+                                                name=f"mpv-{cam_id}")
+            self._mpv_thread.start()
+        self._mpv_queue.put(travail)
+
+    def _liberer_player(self, fin=None):
+        """Empile le terminate() du lecteur puis ferme la file : plus aucun
+        appel ne peut suivre (handle libéré). Retourne le thread chargé de la
+        libération (None s'il n'y a rien à libérer), enregistré pour que
+        `attendre_liberations` le borne à la fermeture de l'application."""
+        player, self._player = self._player, None
+        if player is None:
+            if self._mpv_queue is not None:      # file sans lecteur : on la ferme
+                self._mpv_queue.put(None)
+                self._mpv_queue, self._mpv_thread = None, None
+            return None
+        if self._mpv_queue is None:
+            self._mpv_appel(lambda: None)   # lecteur créé mais jamais sollicité
+        q, th = self._mpv_queue, self._mpv_thread
+        self._mpv_queue, self._mpv_thread = None, None
+
+        def liberer():
+            try:
+                player.terminate()
+            except Exception:
+                pass
+            finally:
+                with _liberations_lock:
+                    _liberations.discard(th)
+            if fin is not None:
+                fin()
+
+        with _liberations_lock:
+            _liberations.add(th)
+        q.put(liberer)
+        q.put(None)                         # le thread s'arrête après terminate()
+        return th
+
+    def _emettre_libere(self):
+        try:
+            self._libere.emit()
+        except RuntimeError:
+            pass                            # widget déjà détruit (fermeture d'appli)
 
     # ------------------------------------------------------------------ UI
 
@@ -419,30 +503,35 @@ class VideoTile(QFrame):
 
     def set_aspect_mode(self, mode: str):
         self._aspect_mode = mode
-        if self._player is None:
+        player = self._player
+        if player is None:
             return
-        try:
-            if mode == "stretch":
-                self._player["keepaspect"] = False
-                self._player["panscan"] = 0.0
-            elif mode == "crop":
-                self._player["keepaspect"] = True
-                self._player["panscan"] = 1.0
-            else:
-                self._player["keepaspect"] = True
-                self._player["panscan"] = 0.0
-        except Exception:
-            pass
+        keepaspect = mode != "stretch"
+        panscan = 1.0 if mode == "crop" else 0.0
+
+        def appliquer():
+            player["keepaspect"] = keepaspect
+            player["panscan"] = panscan
+        self._mpv_appel(appliquer)
 
     def _save_snapshot(self):
-        if self._player is None or self.state != TileState.PLAYING:
+        player = self._player
+        if player is None or self.state != TileState.PLAYING:
             return
-        try:
-            path = snapshot_path(self.camera)
-            self._player.command("screenshot-to-file", path, "video")
-            self.snapshot_saved.emit(path)
-        except Exception as e:
-            logger.warning(f"[{self.camera.id}] capture impossible : {e}")
+        path = snapshot_path(self.camera)
+        cam_id = self.camera.id
+
+        def capturer():
+            try:
+                player.command("screenshot-to-file", path, "video")
+            except Exception as e:
+                logger.warning(f"[{cam_id}] capture impossible : {e}")
+                return
+            try:
+                self.snapshot_saved.emit(path)
+            except RuntimeError:
+                pass                        # tuile détruite entre-temps
+        self._mpv_appel(capturer)
 
     # ------------------------------------------------------ zoom numérique
 
@@ -457,15 +546,17 @@ class VideoTile(QFrame):
 
     def _set_zoom(self, z: float):
         self._zoom = max(0.0, min(z, 3.0))
-        if self._player is None:
+        player = self._player
+        if player is None:
             return
-        try:
-            self._player["video-zoom"] = self._zoom
-            if self._zoom == 0.0:                 # recentre en dézoom complet
-                self._player["video-pan-x"] = 0.0
-                self._player["video-pan-y"] = 0.0
-        except Exception:
-            pass
+        zoom = self._zoom
+
+        def appliquer():
+            player["video-zoom"] = zoom
+            if zoom == 0.0:                       # recentre en dézoom complet
+                player["video-pan-x"] = 0.0
+                player["video-pan-y"] = 0.0
+        self._mpv_appel(appliquer)
 
     # -------------------------------------------------------------- PTZ
     #
@@ -545,19 +636,39 @@ class VideoTile(QFrame):
         self._ptz_queue = None
 
     def _update_debit(self):
-        """Affiche le débit réseau réellement consommé par la tuile."""
-        if self._player is None or self.state != TileState.PLAYING:
-            return
-        bps = 0.0
-        try:
-            speed = self._player.cache_speed          # octets/s lus sur le réseau
-            if speed:
-                bps = float(speed) * 8
-        except Exception:
+        """Demande le débit réseau réellement consommé par la tuile.
+
+        La LECTURE part sur le thread mpv : `cache-speed` prend le verrou du
+        demuxer, que le thread réseau garde pendant toute une lecture bloquée —
+        interrogé depuis le thread Qt, ce compteur d'affichage gelait la fenêtre
+        entière pendant le timeout réseau d'une seule caméra."""
+        player = self._player
+        if player is None or self.state != TileState.PLAYING or self._debit_en_vol:
+            return                          # lecture précédente encore en file
+        self._debit_en_vol = True
+        gen = self._gen
+
+        def lire():
+            bps = 0.0
             try:
-                bps = float(self._player.video_bitrate or 0)
+                speed = player.cache_speed            # octets/s lus sur le réseau
+                if speed:
+                    bps = float(speed) * 8
             except Exception:
-                bps = 0.0
+                try:
+                    bps = float(player.video_bitrate or 0)
+                except Exception:
+                    bps = 0.0
+            try:
+                self._debit_lu.emit(gen, bps)
+            except RuntimeError:
+                pass                        # tuile détruite entre-temps
+        self._mpv_appel(lire)
+
+    def _on_debit_lu(self, gen: int, bps: float):
+        self._debit_en_vol = False
+        if gen != self._gen or self.state != TileState.PLAYING:
+            return                          # lecture d'une connexion périmée
         self.debit_bps = bps
         base = self._flux_text()
         self._caption.set_data(f"{base} · {format_debit(bps)}" if bps else base)
@@ -584,69 +695,45 @@ class VideoTile(QFrame):
         self._retry_timer.stop()
         self._preventive_timer.stop()
         self._debit_timer.stop()
+        self._debit_en_vol = False
         self.debit_bps = 0.0
         self._caption.set_data(self._flux_text())
-        if self._player is not None:
-            try:
-                self._player.command("stop")
-            except Exception:
-                pass
+        player = self._player
+        if player is not None:
+            # « stop » démonte le flux RTSP : bloquant, jamais sur le thread Qt
+            self._mpv_appel(lambda: player.command("stop"))
         if self.state not in (TileState.AUTH_FAILED, TileState.NO_PLAYER):
             self._set_state(TileState.IDLE, message)
 
     def shutdown(self):
-        """Destruction de la tuile : libère mpv et arrête le PTZ (synchrone)."""
+        """Destruction de la tuile : arrête le PTZ et libère mpv.
+
+        La libération part sur le thread mpv de la tuile — un terminate() sur un
+        flux figé bloque longtemps, et l'enchaîner sur 16 tuiles depuis le thread
+        Qt rendait la fermeture de l'application interminable. `closeEvent`
+        borne l'attente avec `attendre_liberations`."""
         self._ptz_shutdown()            # stoppe un mouvement en cours + le worker
         self.stop()
-        if self._player is not None:
-            try:
-                self._player.terminate()
-            except Exception:
-                pass
-            self._player = None
+        self._liberer_player()
 
     def dispose(self):
-        """Comme shutdown() + deleteLater(), mais libère mpv HORS du thread Qt.
-
-        terminate() joint le thread d'événements mpv et démonte le flux RTSP :
-        en série sur 9-16 tuiles, cela gelait l'interface plusieurs secondes à
-        chaque changement de vue sur les mini-PC. La tuile se cache tout de
-        suite, la libération se fait en arrière-plan, puis le widget se détruit
-        (la fenêtre X11 du wid reste vivante tant que mpv ne l'a pas lâchée)."""
+        """Comme shutdown() + deleteLater() : la tuile se cache tout de suite,
+        mpv est libéré en arrière-plan, puis le widget se détruit (la fenêtre
+        X11 du wid reste vivante tant que mpv ne l'a pas lâchée)."""
         self._ptz_shutdown()
         self.stop()
         self.hide()
-        player, self._player = self._player, None
-        if player is None:
-            self.deleteLater()
-            return
         self._libere_fait = False
         self._libere.connect(self._liberation_finie)
+        if self._liberer_player(fin=self._emettre_libere) is None:
+            self._liberation_finie()    # aucun lecteur : destruction immédiate
+            return
         # chien de garde : si terminate() reste bloqué (flux RTSP figé — cas connu
         # de ce projet), _libere ne serait jamais émis et le widget + le thread
         # fuiraient indéfiniment sur un poste 24/7. Passé ce délai, on détruit
         # quand même la tuile (le thread mpv, démon, mourra au pire à l'arrêt).
         # La forme à 3 arguments se déconnecte seule si la tuile est déjà détruite.
         QTimer.singleShot(15000, self, self._liberation_finie)
-
-        def work():
-            try:
-                player.terminate()
-            except Exception:
-                pass
-            finally:
-                with _liberations_lock:
-                    _liberations.discard(th)
-            try:
-                self._libere.emit()
-            except RuntimeError:
-                pass                    # widget déjà détruit (fermeture d'appli)
-
-        th = threading.Thread(target=work, daemon=True,
-                              name=f"mpv-term-{self.camera.id}")
-        with _liberations_lock:
-            _liberations.add(th)
-        th.start()
 
     def _liberation_finie(self):
         """Détruit la tuile une seule fois, que la libération de mpv ait fini
@@ -709,15 +796,24 @@ class VideoTile(QFrame):
             pass                        # caméra incomplète : on garde l'URL connue
         self._gen += 1              # nouvelle tentative : périme les sondes précédentes
         self._probing = False
+        self._debit_en_vol = False
         self._retry_timer.stop()    # un seul réessai armé à la fois
         self._set_state(TileState.CONNECTING, "Connexion…")
         self._log_tail.clear()
-        try:
-            self._player.play(self._url)
-        except Exception as e:
-            logger.warning(f"[{self.camera.id}] loadfile a échoué : {e}")
-            self._handle_failure()
-            return
+        # loadfile passe par le cœur de mpv : bloquant si le flux précédent est
+        # figé. L'échec revient par le chemin normal (end-file), pas par exception.
+        player, url, gen, cam_id = self._player, self._url, self._gen, self.camera.id
+
+        def charger():
+            try:
+                player.play(url)
+            except Exception as e:
+                logger.warning(f"[{cam_id}] loadfile a échoué : {e}")
+                try:
+                    self._evt_ended.emit(gen, 4)      # 4 = ERROR (client.h)
+                except RuntimeError:
+                    pass
+        self._mpv_appel(charger)
         self._connect_timer.start()
 
     def _verifier_apres_lecture(self):
@@ -731,11 +827,23 @@ class VideoTile(QFrame):
     def _log_hwdec(self):
         """Rend visible le mode de décodage réel : le repli VA-API → logiciel de
         mpv est silencieux, et c'est lui qui sature les mini-PC quand le
-        pilote manque (va-driver-all non installé)."""
-        try:
-            hw = str(self._player.hwdec_current or "no")
-        except Exception:
+        pilote manque (va-driver-all non installé). Lecture hors thread Qt."""
+        player = self._player
+        if player is None:
             return
+
+        def lire():
+            try:
+                hw = str(player.hwdec_current or "no")
+            except Exception:
+                return
+            try:
+                self._hwdec_lu.emit(hw)
+            except RuntimeError:
+                pass                        # tuile détruite entre-temps
+        self._mpv_appel(lire)
+
+    def _on_hwdec_lu(self, hw: str):
         logger.debug(f"[{self.camera.id}] décodage : {hw}")
         if (sys.platform != "win32" and hw == "no" and not self._hwdec_signale
                 and os.environ.get("SENTINELLE_MPV_HWDEC", "") != "no"):
@@ -796,10 +904,9 @@ class VideoTile(QFrame):
             return
         logger.warning(f"[{self.camera.id}] timeout de connexion ({CONNECT_TIMEOUT_S}s) "
                        f"sur {mask_url(self._url)}")
-        try:
-            self._player.command("stop")
-        except Exception:
-            pass
+        player = self._player
+        if player is not None:
+            self._mpv_appel(lambda: player.command("stop"))
         self._handle_failure(kind_hint="timeout")
 
     def _preventive_reconnect(self):
