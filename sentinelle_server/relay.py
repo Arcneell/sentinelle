@@ -14,7 +14,6 @@ ne quittent jamais le serveur.
 import logging
 import os
 import threading
-import time
 
 import requests
 
@@ -29,6 +28,11 @@ class Relay:
                                               "http://127.0.0.1:9997")).rstrip("/")
         self.pret = False
         self.derniere_erreur = ""
+        # une seule synchronisation de fond à la fois : chaque appel remplace la
+        # précédente (voir sync_fond)
+        self._sync_lock = threading.Lock()
+        self._sync_arret = threading.Event()
+        self._sync_th: threading.Thread | None = None
 
     def _url(self, chemin: str) -> str:
         return self.api + chemin
@@ -88,9 +92,17 @@ class Relay:
 
     def sync_fond(self, store, tentatives: int = 90, delai: float = 2.0):
         """Synchronisation en arrière-plan avec retries (MediaMTX peut démarrer
-        après l'API — ordre de démarrage des conteneurs non garanti)."""
-        def run():
+        après l'API — ordre de démarrage des conteneurs non garanti).
+
+        UNE seule tentative de fond à la fois : un nouvel appel (sauvegarde de
+        configuration, rechargement) annule la précédente. Sinon, relais
+        injoignable, chaque appel empilait un thread qui vivait
+        tentatives × delai — soit trois minutes de threads concurrents poussant
+        des configurations différentes au même relais."""
+        def run(arret: threading.Event):
             for i in range(tentatives):
+                if arret.is_set():
+                    return
                 try:
                     self.sync(store)
                     self.pret = True
@@ -100,9 +112,27 @@ class Relay:
                     self.derniere_erreur = str(e)
                     if i % 15 == 0:
                         logger.info(f"Relais pas encore joignable ({e}) — nouvel essai")
-                    time.sleep(delai)
+                    if arret.wait(delai):
+                        return
             logger.error("Relais vidéo injoignable : les flux ne sont pas publiés")
-        threading.Thread(target=run, daemon=True, name="relay-sync").start()
+
+        with self._sync_lock:
+            self._sync_arret.set()             # arrête la tentative précédente
+            self._sync_arret = threading.Event()
+            self._sync_th = threading.Thread(target=run, args=(self._sync_arret,),
+                                             daemon=True, name="relay-sync")
+            self._sync_th.start()
+
+    def stop(self):
+        """Arrête la synchronisation de fond (arrêt du serveur, fin de test).
+
+        Sans cela, le thread de retries survivait à l'application : en test,
+        chaque instance en laissait un tourner trois minutes."""
+        with self._sync_lock:
+            self._sync_arret.set()
+            th = self._sync_th
+        if th is not None:
+            th.join(timeout=5)
 
     # ------------------------------------------------------------- diagnostic
 
