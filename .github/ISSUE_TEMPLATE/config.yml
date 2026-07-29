@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Faille de sécurité
+    url: https://github.com/Arcneell/sentinelle/security/advisories/new
+    about: Signalement privé, jamais en issue publique. Voir SECURITY.md.
+  - name: Question d'utilisation ou de déploiement
+    url: https://github.com/Arcneell/sentinelle/discussions
+    about: Pour les questions, préférer les discussions aux issues.

@@ -1,0 +1,81 @@
+name: Rapport de bogue
+description: Signaler un dysfonctionnement
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Merci de prendre le temps de remplir ce rapport.
+
+        **Ne pas signaler ici une faille de sécurité** : suivre
+        [SECURITY.md](https://github.com/Arcneell/sentinelle/blob/main/SECURITY.md).
+
+        Retirer des extraits de journal les identifiants, jetons et adresses IP publiques.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Ce qui se produit, et ce qui était attendu à la place.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Étapes pour reproduire
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version de Sentinelle
+      placeholder: "2.5.0 (visible dans Configuration, ou sentinelle --version)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode de déploiement
+      options:
+        - Autonome
+        - Serveur central
+    validations:
+      required: true
+
+  - type: input
+    id: systeme
+    attributes:
+      label: Système
+      placeholder: "Windows 11 24H2, ou Debian 13 (GNOME/Wayland), ou Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: input
+    id: installation
+    attributes:
+      label: Mode d'installation
+      placeholder: "paquet .deb, exécutable Windows, ou lancé depuis les sources"
+
+  - type: input
+    id: materiel
+    attributes:
+      label: Caméra ou enregistreur concerné
+      description: Marque, modèle et micrologiciel si connu. À renseigner pour tout problème de flux, de PTZ ou de mouvement.
+      placeholder: "Dahua XVR5216AN-4KL-I3, ou Hikvision DS-2CD2043G2-I"
+
+  - type: textarea
+    id: journal
+    attributes:
+      label: Journal
+      description: |
+        Client : `%APPDATA%\Sentinelle\sentinelle.log` (Windows) ou
+        `~/.local/state/sentinelle/sentinelle.log` (Linux).
+        Serveur : `docker compose logs api`.
+      render: text

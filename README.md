@@ -5,332 +5,358 @@
 <h1 align="center">Sentinelle</h1>
 
 <p align="center">
-  <strong>Multi-site video-surveillance viewer for RTSP / ONVIF cameras and DVRs.</strong><br/>
-  Grid & single-camera views, ONVIF motion detection, bandwidth-aware streaming —<br/>
-  standalone, or backed by a central server with user accounts and per-camera access.
+  <strong>Mur d'images multi-sites pour caméras et enregistreurs RTSP / ONVIF.</strong><br/>
+  Vues grille et plein écran, détection de mouvement ONVIF, profils de bande passante —<br/>
+  en poste autonome, ou adossé à un serveur central avec comptes et droits par caméra.
 </p>
 
 <p align="center">
-  <a href="https://github.com/Arcneell/sentinelle/releases"><img src="https://img.shields.io/github/v/release/Arcneell/sentinelle?color=ff7a18&label=release" alt="Release"/></a>
+  <a href="https://github.com/Arcneell/sentinelle/releases"><img src="https://img.shields.io/github/v/release/Arcneell/sentinelle?color=ff7a18&label=version" alt="Version"/></a>
+  <a href="https://github.com/Arcneell/sentinelle/actions/workflows/ci.yml"><img src="https://github.com/Arcneell/sentinelle/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-3776ab.svg" alt="Python 3.11+"/>
-  <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-informational.svg" alt="Platforms"/>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License: AGPL-3.0"/></a>
+  <img src="https://img.shields.io/badge/plateformes-Windows%20%7C%20Linux-informational.svg" alt="Plateformes"/>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-AGPL--3.0-blue.svg" alt="Licence AGPL-3.0"/></a>
 </p>
 
 ---
 
-Sentinelle turns a workstation into a video wall for RTSP / ONVIF cameras and DVRs. It
-works with **Hikvision** and **Dahua** natively, several other brands via URL templates,
-and any **ONVIF** device through auto-discovery — with per-camera bandwidth profiles so
-large grids stay usable even over slow 4G links.
+Sentinelle transforme un poste de travail en mur d'images pour caméras et enregistreurs
+RTSP / ONVIF. Les marques **Hikvision** et **Dahua** sont gérées nativement, plusieurs
+autres via des gabarits d'URL, et n'importe quel équipement **ONVIF** par découverte
+automatique. Chaque caméra reçoit un profil de bande passante, ce qui garde les grandes
+grilles exploitables même derrière un lien 4G.
 
-## Highlights
+## Sommaire
 
-- 🧱 **Grid (up to 4×4) and single-camera views** — double-click any tile to switch.
-- 🚨 **ONVIF motion detection** — moving tiles are outlined in red, and a *motion view*
-  fills the grid live with only the cameras that are currently active.
-- 📉 **Bandwidth profiles** — pick main/substream/snapshot per view; off-screen cameras
-  hold no connection and nothing is transcoded.
-- 🔭 **Wide device support + network discovery** — scan the LAN, tick cameras, and stream
-  URLs, snapshot URLs and PTZ capability are resolved automatically.
-- 🎮 **PTZ control** and digital zoom, per-tile aspect mode, multi-monitor full screen.
-- 🔁 **Rotation & loops** — ordered sequences of views played on repeat, with an editor.
-- 🖥️ **Optional central server** — shared configuration, user accounts with per-camera
-  access, and a stream relay that pulls each camera **once** regardless of viewer count.
+- [Fonctionnalités](#fonctionnalités)
+- [Modes de déploiement](#modes-de-déploiement)
+- [Démarrage rapide](#démarrage-rapide)
+- [Configuration](#configuration)
+- [Fonctionnement détaillé](#fonctionnement-détaillé)
+- [Serveur central](#serveur-central)
+- [Construction des paquets](#construction-des-paquets)
+- [Architecture](#architecture)
+- [Contribuer](#contribuer)
+- [Sécurité](#sécurité)
+- [Licence](#licence)
 
-## Deployment modes
+## Fonctionnalités
 
-Choose per workstation at first launch. The mode is then locked — switching it, or the
-server address, requires an admin account to sign in on that workstation.
+- **Vues grille (jusqu'à 4×4) et plein écran** — double-clic sur une tuile pour basculer.
+- **Détection de mouvement ONVIF** — les tuiles qui bougent sont cerclées de rouge, et une
+  *vue mouvement* remplit la grille en direct avec les seules caméras actives.
+- **Profils de bande passante** — flux principal, secondaire ou vignette JPEG selon la vue.
+  Une caméra hors écran ne tient aucune connexion, et rien n'est réencodé.
+- **Large compatibilité et découverte réseau** — un balayage du réseau local suffit :
+  URL de flux, URL de vignette et présence du PTZ sont résolues automatiquement.
+- **Commande PTZ** et zoom numérique, mode d'affichage par tuile, plein écran multi-écrans.
+- **Rotations et boucles** — séquences de vues ordonnées jouées en continu, avec éditeur.
+- **Serveur central facultatif** — configuration partagée, comptes utilisateurs avec droits
+  par caméra, et relais de flux qui ne tire chaque caméra **qu'une fois**, quel que soit le
+  nombre de spectateurs.
 
-|                      | **Standalone** (default)  | **Central server**                                              |
-| -------------------- | ------------------------- | --------------------------------------------------------------- |
-| Extra infrastructure | none                      | one Docker host (VM / NAS / mini-PC)                            |
-| Configuration        | local to each workstation | centralised — add a camera once, everyone sees it                |
-| DVR credentials      | on each workstation       | **never leave the server** (clients get a token)                |
-| Access control       | —                         | per-user sites/cameras, enforced server-side *and* at the relay  |
-| Bandwidth to sites   | one pull per viewer       | **one pull per camera**, only while watched (key for 4G)         |
-| Admin                | —                         | in-app Administration panel (users, cameras, loops)              |
+## Modes de déploiement
 
-See [Server](#central-server) below for deployment.
+Le mode se choisit au premier lancement de chaque poste, puis se verrouille : le modifier,
+comme changer l'adresse du serveur, demande la connexion d'un compte administrateur sur ce
+poste.
 
-## Quick start
+|                        | **Autonome** (par défaut)   | **Serveur central**                                                 |
+| ---------------------- | --------------------------- | ------------------------------------------------------------------- |
+| Infrastructure         | aucune                      | un hôte Docker (VM, NAS, mini-PC)                                   |
+| Configuration          | locale à chaque poste       | centralisée : une caméra ajoutée une fois est visible par tous      |
+| Identifiants des DVR   | sur chaque poste            | **ne quittent jamais le serveur** (les clients reçoivent un jeton)  |
+| Contrôle d'accès       | —                           | sites et caméras par utilisateur, appliqués côté API *et* au relais |
+| Bande passante         | un tirage par spectateur    | **un tirage par caméra**, seulement pendant le visionnage           |
+| Administration         | —                           | panneau Administration intégré (comptes, caméras, boucles)          |
 
-Requires **Python 3.11+** and **libmpv**.
+## Démarrage rapide
 
-- Windows: put `libmpv-2.dll` in a `lib/` folder at the project root.
-- Debian/Ubuntu: `sudo apt install libmpv2 libxcb-cursor0 va-driver-all` — Fedora: `sudo dnf install mpv-libs xcb-util-cursor libva-utils`.
-  (`libxcb-cursor0` is needed by Qt's X11 backend, used for video embedding — including under Wayland via XWayland; `va-driver-all` enables **hardware video decoding** (VA-API), which is what lets low-power mini-PCs run many streams without saturating the CPU.)
-- Optional: `ffprobe` (from `ffmpeg`) improves failure diagnostics.
+Prérequis : **Python 3.11+** et **libmpv**.
+
+- Windows : placer `libmpv-2.dll` dans un dossier `lib/` à la racine du projet.
+- Debian / Ubuntu : `sudo apt install libmpv2 libxcb-cursor0 va-driver-all`
+  Fedora : `sudo dnf install mpv-libs xcb-util-cursor libva-utils`
+  `libxcb-cursor0` est requis par le backend X11 de Qt, utilisé pour l'incrustation vidéo —
+  y compris sous Wayland via XWayland. `va-driver-all` active le **décodage vidéo
+  matériel** (VA-API), ce qui permet à un mini-PC de faible puissance d'afficher de
+  nombreux flux sans saturer le processeur.
+- Facultatif : `ffprobe` (paquet `ffmpeg`) améliore le diagnostic des échecs.
 
 ```bash
 pip install -r requirements.txt
 python run.py
 ```
 
-The Configuration window opens on first run.
+La fenêtre de configuration s'ouvre au premier lancement.
 
-> **Prefer a package?** Pre-built Linux `.deb` files are attached to every
-> [release](https://github.com/Arcneell/sentinelle/releases):
-> `sudo apt install ./sentinelle_<version>_amd64.deb` — this is the supported install
-> path: it pulls `libmpv2`, the Qt/xcb libraries, the VA-API drivers (hard
-> dependencies) and `ffmpeg` (recommended, better failure diagnostics).
-> Plain `dpkg -i` does not resolve dependencies; if you use it, follow up with
-> `apt -f install`.
+> **Installation par paquet.** Un `.deb` est joint à chaque
+> [version publiée](https://github.com/Arcneell/sentinelle/releases) :
+> `sudo apt install ./sentinelle_<version>_amd64.deb`. C'est le chemin d'installation
+> pris en charge : il installe `libmpv2`, les bibliothèques Qt/xcb et les pilotes VA-API
+> (dépendances strictes) ainsi que `ffmpeg` (recommandé). `dpkg -i` ne résout pas les
+> dépendances ; le cas échéant, enchaîner avec `apt -f install`.
 
 ## Configuration
 
-Managed entirely in the UI: add a site (fiber or 4G), add a DVR (address and
-credentials, then channel discovery or a manual list), then tick the cameras to display.
+Tout se gère dans l'interface : ajouter un site (fibre ou 4G), ajouter un enregistreur
+(adresse et identifiants, puis découverte des canaux ou liste manuelle), puis cocher les
+caméras à afficher.
 
-Stored at `%APPDATA%\Sentinelle\config.yaml` (Windows) or
-`~/.config/sentinelle/config.yaml` (Linux); a `config.yaml` next to the executable takes
-priority. Passwords are obfuscated in the file, not encrypted — the key ships with the
-app, so this only prevents casual reading. **Use a read-only DVR account.**
+Le fichier est écrit dans `%APPDATA%\Sentinelle\config.yaml` (Windows) ou
+`~/.config/sentinelle/config.yaml` (Linux) ; un `config.yaml` placé à côté de l'exécutable
+a la priorité. Les mots de passe y sont obscurcis, non chiffrés : la clé est embarquée dans
+l'application, ce qui n'empêche qu'une lecture de passage. **Utiliser un compte DVR en
+lecture seule.**
 
-## Features in detail
+## Fonctionnement détaillé
 
-### Motion detection (ONVIF)
+### Détection de mouvement (ONVIF)
 
-Toggle **Mouvement** to subscribe to each camera's ONVIF event stream (PullPoint). When a
-camera reports motion, its tile is outlined in red. Toggle **Vue mouvement** and the grid
-stops showing your manual selection and instead shows, live, only the cameras currently
-moving — a hands-off wall that surfaces activity across every site.
+Le bouton **Mouvement** abonne l'application au flux d'événements ONVIF de chaque caméra
+(PullPoint). Quand une caméra signale un mouvement, sa tuile est cerclée de rouge. Le
+bouton **Vue mouvement** remplace la sélection manuelle par les seules caméras en train de
+bouger, en direct : un mur sans intervention qui fait remonter l'activité de tous les
+sites.
 
-Requires ONVIF (and its motion rule) enabled on the device; a camera without an event
-service is simply skipped. Motion clears on the camera's "off" event, or after a few
-seconds without a new one.
+L'ONVIF et sa règle de mouvement doivent être activés sur l'équipement ; une caméra sans
+service d'événements est simplement ignorée. Le mouvement retombe sur l'événement « off »
+de la caméra, ou après quelques secondes sans nouvel événement.
 
-### Bandwidth profiles
+### Profils de bande passante
 
-Only the stream requested from the DVR determines the bitrate — there is no transcoding,
-and an off-screen camera holds no connection.
+Seul le flux demandé à l'enregistreur détermine le débit : il n'y a aucun réencodage, et
+une caméra hors écran ne tient aucune connexion.
 
-| Profile     | Grid                           | Single           |
-| ----------- | ------------------------------ | ---------------- |
-| Normal      | substream                      | mainstream (HD)  |
-| Eco         | substream                      | substream        |
-| Extreme eco | JPEG snapshot every N seconds  | substream        |
+| Profil       | Grille                          | Plein écran            |
+| ------------ | ------------------------------- | ---------------------- |
+| Normal       | flux secondaire                 | flux principal (HD)    |
+| Éco          | flux secondaire                 | flux secondaire        |
+| Éco extrême  | vignette JPEG toutes les N s    | flux secondaire        |
 
-Rotation and loops close the current streams before opening the next. RTSP runs over TCP.
-Rendering favours **robustness over sharpness**: on Linux, video is decoded in **hardware**
-(VA-API) and rendered in software (no OpenGL) — this runs on any hardware, including the
-low-power fanless mini-PCs used as video walls, whose GPU drivers often crash mpv's OpenGL
-path. Set `SENTINELLE_MPV_VO` / `SENTINELLE_MPV_HWDEC` to override per machine.
+Les rotations et les boucles ferment les flux en cours avant d'ouvrir les suivants. Le RTSP
+passe en TCP. Le rendu privilégie la **robustesse sur la finesse** : sous Linux, la vidéo
+est décodée en **matériel** (VA-API) puis rendue en logiciel, sans OpenGL. Ce chemin
+fonctionne sur n'importe quel matériel, y compris les mini-PC fanless utilisés comme murs
+d'images, dont les pilotes graphiques font souvent tomber le chemin OpenGL de mpv. Les
+variables `SENTINELLE_MPV_VO` et `SENTINELLE_MPV_HWDEC` permettent de forcer un autre
+réglage machine par machine.
 
-### Device support
+### Matériel pris en charge
 
-Hikvision, Dahua, Amcrest, Reolink, Uniview, Axis, Vivotek, Foscam and TP-Link/Tapo via
-built-in URL templates, plus **ONVIF** for anything else. ONVIF network discovery scans
-the LAN and resolves each camera's stream URLs (main + sub), snapshot URL and PTZ
-capability. Whole-DVR import discovers channels and their names over the Hikvision ISAPI,
-or lists them manually for other brands.
+Hikvision, Dahua, Amcrest, Reolink, Uniview, Axis, Vivotek, Foscam et TP-Link/Tapo par
+gabarits d'URL intégrés, plus **ONVIF** pour tout le reste. La découverte réseau ONVIF
+balaie le réseau local et résout pour chaque caméra ses URL de flux (principal et
+secondaire), son URL de vignette et sa capacité PTZ. L'import d'un enregistreur complet
+découvre les canaux et leurs noms via l'ISAPI Hikvision, ou les liste manuellement pour les
+autres marques.
 
-Reconnection uses exponential backoff, and retries stop on an authentication failure to
-avoid locking the DVR account.
+La reconnexion applique un délai exponentiel, et les tentatives s'arrêtent sur un échec
+d'authentification afin de ne pas verrouiller le compte de l'enregistreur.
 
-## Central server
+## Serveur central
 
-The server is two containers: a FastAPI control plane and a
-[MediaMTX](https://github.com/bluenviron/mediamtx) stream relay. Streams are proxied **on
-demand** with no re-encoding (H.264 passthrough), so CPU usage stays negligible.
+Le serveur tient en deux conteneurs : une API FastAPI et un relais de flux
+[MediaMTX](https://github.com/bluenviron/mediamtx). Les flux sont relayés **à la demande**
+sans réencodage (H.264 en passthrough), donc la charge processeur reste négligeable.
 
-Deploy it on a Linux machine that can reach the DVRs and is reachable by the workstations.
-Prerequisites: Docker with the Compose plugin
-(`sudo apt install docker.io docker-compose-v2` on Debian/Ubuntu). Then, from a clone of
-this repository:
+À déployer sur une machine Linux qui atteint les enregistreurs et que les postes peuvent
+joindre. Prérequis : Docker et le greffon Compose
+(`sudo apt install docker.io docker-compose-v2` sur Debian / Ubuntu). Depuis un clone de ce
+dépôt :
 
 ```bash
 cd deploy
-docker compose up -d --build     # builds the API image and starts both containers
+docker compose up -d --build     # construit l'image de l'API et lance les deux conteneurs
 ```
 
-- On first start an **admin** account is created; its initial password is printed in the
-  API logs (`docker compose logs api`) and written to `deploy/data/admin-initial.txt`. Log
-  in with it, change it (*Configuration → Mon compte*), then delete that file.
-- To bootstrap from an existing standalone installation, copy its `config.yaml` into
-  `deploy/data/` before the first start — same file format.
-- Manage everything from the app while logged in as admin → **Administration**: create
-  users, grant each whole sites or individual cameras, edit cameras/sites, loops, settings.
-- On each workstation: *Configuration → Connexion* → mode **Serveur central** and the
-  server URL (`http://server:8080`), then log in. "Rester connecté" stores the credentials
-  for unattended restart (use a dedicated viewer account on wall displays).
-- **Ports**: `8080/tcp` (API — login, config, snapshots, PTZ, motion over SSE, relay
-  auth) and `8554/tcp` (RTSP relay). The MediaMTX control port stays inside the Docker
-  network.
-- **Data directory ownership**: the API runs unprivileged (UID/GID 10001), so `deploy/data/`
-  *and everything in it* must be writable by that UID — `sudo chown -R 10001:10001 data`. A
-  file dropped there by root (manual bootstrap, older install) stays read-only to the server;
-  it starts anyway and says so in the log, but cannot save settings.
-- **Update**: `git pull && docker compose up -d --build`. After editing
-  `deploy/mediamtx.yml`, recreate the relay so it reloads: `docker compose up -d
-  --force-recreate mediamtx`.
+- Au premier démarrage, un compte **admin** est créé ; son mot de passe initial est écrit
+  dans les journaux de l'API (`docker compose logs api`) et dans
+  `deploy/data/admin-initial.txt`. Se connecter avec, le changer (*Configuration → Mon
+  compte*), puis supprimer ce fichier.
+- Pour repartir d'une installation autonome existante, copier son `config.yaml` dans
+  `deploy/data/` avant le premier démarrage : le format de fichier est identique.
+- Tout s'administre depuis l'application, connecté en admin, via **Administration** : créer
+  des comptes, leur accorder des sites entiers ou des caméras précises, modifier caméras,
+  sites, boucles et réglages.
+- Sur chaque poste : *Configuration → Connexion*, mode **Serveur central**, puis l'URL du
+  serveur (`http://serveur:8080`) et la connexion. « Rester connecté » mémorise les
+  identifiants pour un redémarrage sans intervention — utiliser un compte de visionnage
+  dédié sur les murs d'images.
+- **Ports** : `8080/tcp` (API : connexion, configuration, vignettes, PTZ, mouvement en SSE,
+  autorisation du relais) et `8554/tcp` (relais RTSP). Le port de commande de MediaMTX
+  reste interne au réseau Docker.
+- **Propriétaire du dossier de données** : l'API tourne sans privilèges (UID/GID 10001),
+  donc `deploy/data/` *et tout son contenu* doivent être accessibles en écriture à cet UID
+  (`sudo chown -R 10001:10001 data`). Un fichier déposé là par root — amorçage manuel,
+  ancienne installation — reste en lecture seule pour le serveur : il démarre quand même et
+  le signale dans le journal, mais ne peut pas enregistrer les réglages.
+- **Mise à jour** : `git pull && docker compose up -d --build`. Après modification de
+  `deploy/mediamtx.yml`, recréer le relais pour qu'il recharge sa configuration :
+  `docker compose up -d --force-recreate mediamtx`.
 
-**Security model.** Passwords are hashed with PBKDF2 (never stored or sent in clear)
-with an 8-character minimum; sessions are stateless signed tokens that a password change
-immediately invalidates and that **expire** after `SENTINELLE_TOKEN_TTL_H` hours (default
-168 = 7 days — clients with "Rester connecté" refresh silently before expiry; accounts with
-the Service role get a non-expiring stream token instead, see below); repeated
-failed logins from one IP are throttled (HTTP 429). Per-user camera access is enforced
-both in the API and at the relay (MediaMTX external HTTP authorization calls back into the
-API for every read, and external publishing to the relay is refused); DVR credentials live
-only on the server.
+### Modèle de sécurité
 
-The API speaks plain HTTP — deploy it on a trusted network (VPN), or terminate TLS with the
-bundled Caddy overlay:
+Les mots de passe sont hachés en PBKDF2, jamais stockés ni transmis en clair, avec un
+minimum de 8 caractères. Les sessions sont des jetons signés sans état, qu'un changement de
+mot de passe invalide immédiatement et qui **expirent** au bout de
+`SENTINELLE_TOKEN_TTL_H` heures (168 par défaut, soit 7 jours ; les clients ayant coché
+« Rester connecté » les renouvellent silencieusement avant échéance, et les comptes de rôle
+Service reçoivent à la place un jeton de flux sans expiration, voir plus bas). Les échecs
+de connexion répétés depuis une même IP sont ralentis (HTTP 429). Les droits par caméra sont
+appliqués à la fois dans l'API et au relais : MediaMTX interroge l'API pour chaque lecture
+via son autorisation HTTP externe, et toute publication externe vers le relais est refusée.
+Les identifiants des enregistreurs ne vivent que sur le serveur.
+
+L'API parle HTTP en clair : la déployer sur un réseau de confiance (VPN), ou terminer le
+TLS avec la surcouche Caddy fournie.
 
 ```bash
-export SENTINELLE_DOMAIN=sentinelle.example.org   # or use `tls internal` — see deploy/Caddyfile
+export SENTINELLE_DOMAIN=sentinelle.example.org   # ou « tls internal », voir deploy/Caddyfile
 docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
 ```
 
-`deploy/data/` holds all secrets and is gitignored.
+`deploy/data/` contient tous les secrets et est exclu du dépôt.
 
-### Third-party stream consumers
+### Consommateurs de flux tiers
 
-Any other program that needs the cameras — a video-analytics service, a recorder — should
-read them **through the relay** instead of dialling the DVRs itself. Each camera then costs
-one connection to its site no matter how many consumers there are, which matters on the 4G
-links, and DVR credentials stay on the server.
+Tout autre programme ayant besoin des caméras — analyse vidéo, enregistrement — doit les
+lire **à travers le relais** plutôt que de contacter les enregistreurs lui-même. Chaque
+caméra ne coûte alors qu'une connexion vers son site quel que soit le nombre de
+consommateurs, ce qui compte sur les liens 4G, et les identifiants des enregistreurs restent
+sur le serveur.
 
-Create an account with the **Service** role (Administration → Utilisateurs), tick only the
-cameras it needs, then let it call `GET /api/streams` with its session token:
+Créer un compte de rôle **Service** (Administration → Utilisateurs), ne cocher que les
+caméras nécessaires, puis appeler `GET /api/streams` avec son jeton de session :
 
 ```bash
-TOKEN=$(curl -s -X POST http://server:8080/api/login \
+TOKEN=$(curl -s -X POST http://serveur:8080/api/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"vision","password":"…"}' | jq -r .token)
 
-curl -s http://server:8080/api/streams -H "Authorization: Bearer $TOKEN"
+curl -s http://serveur:8080/api/streams -H "Authorization: Bearer $TOKEN"
 ```
 
 ```json
-{ "relay": { "host": "server", "port": 8554 },
+{ "relay": { "host": "serveur", "port": 8554 },
   "expire_s": 0,
   "streams": [ { "camera": "cam1", "nom": "Entrée", "site": "s1", "site_nom": "Site 1",
                  "lien": "4g", "profil": "normal", "ptz": false, "snapshot": true,
-                 "main": "rtsp://vision:<token>@server:8554/cam1-main",
-                 "sub":  "rtsp://vision:<token>@server:8554/cam1-sub" } ] }
+                 "main": "rtsp://vision:<jeton>@serveur:8554/cam1-main",
+                 "sub":  "rtsp://vision:<jeton>@serveur:8554/cam1-sub" } ] }
 ```
 
-The URLs are ready to hand to ffmpeg/OpenCV and carry the relay-scoped token as the RTSP
-password, so **the response is a secret** — do not log it or write it to a world-readable
-config file. Streams are passed through untouched, so `-main` has exactly the resolution the
-DVR main stream had: detection zones drawn against a direct feed stay valid. `snapshot: true`
-means `GET /api/snapshot/<camera>` works, which is handier than a one-frame ffmpeg pull when
-tracing those zones. Motion is available on `GET /api/events` (SSE) if the consumer would
-rather wake up on movement than poll frames.
+Les URL sont directement exploitables par ffmpeg ou OpenCV et portent le jeton de relais
+comme mot de passe RTSP : **la réponse est un secret**, à ne pas journaliser ni écrire dans
+un fichier lisible par tous. Les flux sont transmis tels quels, donc `-main` a exactement la
+résolution du flux principal de l'enregistreur : des zones de détection tracées sur un flux
+direct restent valides. `snapshot: true` signale que `GET /api/snapshot/<camera>` répond, ce
+qui est plus pratique qu'une extraction d'image par ffmpeg pour tracer ces zones. Le
+mouvement est disponible sur `GET /api/events` (SSE) pour un consommateur qui préfère se
+réveiller sur événement plutôt que scruter les images.
 
-**The Service role** is what makes this workable unattended. Such an account:
+Le **rôle Service** est ce qui rend cet usage tenable sans surveillance. Un tel compte :
 
-- gets a **stream token that never expires** (`expire_s: 0`). Analytics services run for
-  months without supervision and their RTSP library often treats a 401 as a permanent
-  failure, so an expiring token would blind them silently. Its *API* token still expires
-  normally — leaking one only costs a re-login, not perpetual API access;
-- **never sees everything**: `tout` is forced off, so it reads exactly the sites and cameras
-  you ticked, nothing more;
-- **reaches only the read endpoints** — `/api/streams`, `/api/session`, `/api/snapshot/…`,
-  `/api/events`. Administration, PTZ, loops and even changing its own password answer 403.
+- reçoit un **jeton de flux sans expiration** (`expire_s: 0`). Les services d'analyse
+  tournent des mois sans supervision et leur bibliothèque RTSP traite souvent un 401 comme
+  un échec définitif : un jeton expirant les rendrait aveugles en silence. Son jeton *d'API*
+  expire normalement, si bien qu'une fuite ne coûte qu'une reconnexion, pas un accès
+  perpétuel à l'API ;
+- **ne voit jamais tout** : l'option « tout » est forcée à l'arrêt, il lit exactement les
+  sites et caméras cochés, rien de plus ;
+- **n'atteint que les points d'accès de lecture** : `/api/streams`, `/api/session`,
+  `/api/snapshot/…` et `/api/events`. L'administration, le PTZ, les boucles et même le
+  changement de son propre mot de passe répondent 403.
 
-Since the stream token has no expiry, revocation is the way to cut it: select the account
-and hit **Déconnecter partout** (or `POST /api/users/<name>/revoke`), which invalidates
-every token it holds immediately. Changing its password does the same. Demoting it out of
-the Service role also kills the perpetual tokens it was issued.
+Le jeton de flux n'expirant pas, la révocation est le moyen de le couper : sélectionner le
+compte et cliquer **Déconnecter partout** (ou `POST /api/users/<nom>/revoke`), ce qui
+invalide immédiatement tous ses jetons. Un changement de mot de passe a le même effet.
+Retirer le rôle Service au compte tue également les jetons perpétuels déjà émis.
 
-If the relay is reachable at a different address than the API, set `relay_host` in
-`deploy/data/server.yaml` — it must be an address every consumer can use, workstations
-included.
+Si le relais est joignable à une autre adresse que l'API, renseigner `relay_host` dans
+`deploy/data/server.yaml` — elle doit être utilisable par tous les consommateurs, postes de
+travail compris.
 
-## Building packages
+## Construction des paquets
 
-Pre-built Linux packages are attached to each
-[release](https://github.com/Arcneell/sentinelle/releases). To build them yourself:
+Des paquets Linux sont joints à chaque
+[version publiée](https://github.com/Arcneell/sentinelle/releases). Pour les construire
+soi-même :
 
 ```bash
-# Linux .deb (works from Windows too, via Docker) -> dist/sentinelle_<version>_amd64.deb
-# Build on the SAME Debian release as the target machines (Debian 13/trixie).
+# .deb Linux (fonctionne aussi depuis Windows, via Docker) -> dist/sentinelle_<version>_amd64.deb
+# Construire sur la MÊME version de Debian que les machines cibles (Debian 13 / trixie).
 docker run --rm -v "${PWD}:/src" -w /src debian:13 bash packaging/build_deb.sh
 ```
 
 ```powershell
-# Windows executable (PyInstaller) — builds dist/Sentinelle/Sentinelle.exe
+# Exécutable Windows (PyInstaller) -> dist/Sentinelle/Sentinelle.exe
 pwsh packaging/build_windows.ps1
 ```
 
-The script signs the executable when a code-signing certificate is provided
-(`$env:SENTINELLE_PFX` / `$env:SENTINELLE_PFX_PW`) — **recommended**, as unsigned builds are
-routinely blocked by endpoint protection (Symantec Endpoint Protection & co.). Without a
-certificate it still builds, unsigned.
+Le script signe l'exécutable si un certificat de signature de code est fourni
+(`$env:SENTINELLE_PFX` et `$env:SENTINELLE_PFX_PW`), ce qui est **recommandé** : les binaires
+non signés sont régulièrement bloqués par les protections de poste. Sans certificat, la
+construction aboutit quand même, non signée.
 
-Installed `.deb`: launch **Sentinelle** from the applications menu or the `sentinelle`
-command (Debian 13 / Ubuntu 24.04+). On a Wayland session (GNOME's default) the app
-automatically requests XWayland (`QT_QPA_PLATFORM=xcb;wayland`, i.e. xcb with a wayland
-fallback) so video renders — set that variable yourself only to override the
-auto-detection. If it ends up on native Wayland (video unavailable), the app now says so
-at startup. If the GPU driver makes video crash the machine, right-click the launcher
-icon and pick **Safe video mode**, or run `sentinelle --safe-video`.
+Après installation du `.deb`, lancer **Sentinelle** depuis le menu des applications ou par
+la commande `sentinelle` (Debian 13, Ubuntu 24.04+). En session Wayland — le défaut de
+GNOME — l'application demande automatiquement XWayland
+(`QT_QPA_PLATFORM=xcb;wayland`, soit xcb avec repli wayland) pour que la vidéo s'affiche ;
+ne définir cette variable soi-même que pour contourner cette détection. Si l'application se
+retrouve en Wayland natif, donc sans vidéo, elle le signale au démarrage. Si le pilote
+graphique fait tomber la machine, un clic droit sur l'icône de lancement propose **Mode
+vidéo sûr**, également disponible par `sentinelle --safe-video`.
 
 ## Architecture
 
 ```
-sentinelle/                  Desktop client (PySide6 / Qt 6)
-├── config.py                Data model, brand URL templates, config.yaml read/write
-├── probe.py                 RTSP failure classification (auth / timeout / network)
-├── snapshot.py              JPEG snapshots (ISAPI/CGI) and Hikvision channel discovery
-├── onvif.py                 ONVIF: WS-Discovery, stream/snapshot URIs, PTZ, motion events
-├── motion.py                ONVIF motion monitor (per-camera event subscription threads)
-├── player.py                libmpv loading, RTSP settings, VA-API HW decode
-├── remote.py                Server mode: API client, session login, SSE motion listener
-└── ui/                      Title bar, sidebar, grid/single views, tiles, dialogs, theme
-sentinelle_server/           Server (no Qt dependency)
-├── app.py                   FastAPI API: login, config, snapshots, PTZ, SSE, relay-auth
-├── auth.py                  User accounts, PBKDF2 hashing, signed tokens, permissions
-├── store.py                 Central config (same YAML format) + secret/bootstrap admin
-├── relay.py                 MediaMTX orchestration (one on-demand path per stream)
-└── motion.py                Server-side ONVIF motion monitor + event hub
+sentinelle/                  Client de bureau (PySide6 / Qt 6)
+├── config.py                Modèle de données, gabarits d'URL, lecture/écriture config.yaml
+├── probe.py                 Classement des échecs RTSP (auth / délai / réseau)
+├── snapshot.py              Vignettes JPEG (ISAPI/CGI) et découverte des canaux Hikvision
+├── onvif.py                 ONVIF : WS-Discovery, URI de flux et vignette, PTZ, événements
+├── motion.py                Moniteur de mouvement ONVIF (un thread d'abonnement par caméra)
+├── player.py                Chargement de libmpv, réglages RTSP, décodage matériel VA-API
+├── remote.py                Mode serveur : client API, session, écoute SSE du mouvement
+└── ui/                      Barre de titre, panneau latéral, vues, tuiles, dialogues, thème
+sentinelle_server/           Serveur (aucune dépendance Qt)
+├── app.py                   API FastAPI : connexion, config, vignettes, PTZ, SSE, auth relais
+├── auth.py                  Comptes, hachage PBKDF2, jetons signés, droits
+├── store.py                 Configuration centrale (même format YAML) + amorçage admin
+├── relay.py                 Orchestration de MediaMTX (un chemin à la demande par flux)
+└── motion.py                Moniteur de mouvement ONVIF côté serveur + bus d'événements
 deploy/                      docker-compose.yml, Dockerfile.server, mediamtx.yml
-packaging/                   .deb build script, icon generation
+packaging/                   Script de construction du .deb, génération des icônes
+tests/                       Tests unitaires et de fumée (pytest)
 ```
 
-ONVIF is implemented directly over SOAP/HTTP (WS-UsernameToken digest auth) — no
-`zeep`/`onvif-zeep` dependency. Network discovery uses WS-Discovery multicast, which does
-not cross VLAN/VPN boundaries; cameras on routed subnets are added by direct IP instead.
-Each tile runs its own libmpv instance on a separate thread, so a failing stream never
-affects the others.
+L'ONVIF est implémenté directement sur SOAP/HTTP (authentification WS-UsernameToken en
+digest), sans dépendance `zeep` ou `onvif-zeep`. La découverte réseau utilise le multicast
+WS-Discovery, qui ne franchit pas les frontières de VLAN ou de VPN : les caméras sur des
+sous-réseaux routés s'ajoutent par IP directe. Chaque tuile fait tourner sa propre instance
+de libmpv sur un thread distinct, de sorte qu'un flux en échec n'affecte jamais les autres.
 
-## Tech stack
+**Pile technique.** Client : Python 3.11+, [PySide6](https://doc.qt.io/qtforpython/) (Qt 6),
+[python-mpv](https://github.com/jaseg/python-mpv), PyYAML, requests. Serveur : FastAPI,
+uvicorn et [MediaMTX](https://github.com/bluenviron/mediamtx) en conteneurs.
 
-**Client** — Python 3.11+, [PySide6](https://doc.qt.io/qtforpython/) (Qt 6),
-[python-mpv](https://github.com/jaseg/python-mpv), PyYAML, requests.
-**Server** — FastAPI + uvicorn, [MediaMTX](https://github.com/bluenviron/mediamtx) (Docker).
+## Contribuer
 
-## License
+Les contributions sont bienvenues : correctifs, prise en charge de nouvelles marques,
+traductions, documentation. Le guide [CONTRIBUTING.md](CONTRIBUTING.md) décrit
+l'environnement de développement, les conventions de code et de commit, et le parcours
+d'une *pull request*. Les échanges suivent le [code de conduite](CODE_OF_CONDUCT.md).
 
-Copyright (C) 2026 Arcneell. Sentinelle is free software, licensed under the
-**[GNU Affero General Public License v3.0 or later](LICENSE)**.
+L'interface et les messages sont pour l'instant entièrement en français ; le code et les
+commentaires le sont également.
 
-Use it — including inside a company, on as many walls as you like — study it,
-modify it, redistribute it, build on top of it. No fee, no seat count, no
-expiry.
+## Sécurité
 
-The AGPL asks one thing back: **share alike**. Anyone who distributes Sentinelle
-or a derivative, *or* who runs a modified version as a network service other
-people interact with ([§13](LICENSE) — the server here being exactly that), owes
-those users the complete corresponding source under the same terms. So the
-project cannot be closed, absorbed into a proprietary product, or resold as a
-black box.
+Pour signaler une vulnérabilité, suivre [SECURITY.md](SECURITY.md) — pas d'*issue*
+publique.
 
-Two consequences worth stating plainly:
+## Licence
 
-- **Releases up to 2.5.0 were published under the MIT License** and stay MIT
-  forever — a fork of those tags is not bound by the AGPL. Only later versions
-  are.
-- The AGPL does not forbid charging money as such; it forbids keeping the source
-  closed. A paid service built on Sentinelle is allowed **only if it ships its
-  source** to its users.
-
-Contributions are welcome and are accepted under the AGPL-3.0-or-later, no CLA.
-
-Bundled and required third-party components keep their own licenses, all
-compatible with the AGPL: PySide6/Qt 6 (LGPLv3), libmpv (LGPLv2.1+), FastAPI,
-uvicorn and MediaMTX (MIT).
+Sentinelle est un logiciel libre distribué sous licence
+[GNU Affero General Public License v3.0 ou ultérieure](LICENSE).

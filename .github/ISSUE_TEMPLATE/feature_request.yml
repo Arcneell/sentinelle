@@ -1,0 +1,32 @@
+name: Demande d'évolution
+description: Proposer une fonctionnalité ou la prise en charge d'un nouvel équipement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: besoin
+    attributes:
+      label: Besoin
+      description: Le problème concret à résoudre, avant la solution envisagée.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposition
+    attributes:
+      label: Proposition
+      description: Le comportement souhaité. Préciser où il s'inscrirait dans l'interface ou l'API.
+    validations:
+      required: true
+
+  - type: input
+    id: materiel
+    attributes:
+      label: Équipement concerné
+      description: Pour la prise en charge d'une marque, indiquer le modèle et, si elles sont connues, les URL RTSP et de vignette qui fonctionnent.
+      placeholder: "Uniview NVR301-04S3 — rtsp://…:554/media/video1"
+
+  - type: textarea
+    id: contexte
+    attributes:
+      label: Contexte
+      description: Nombre de caméras et de sites, type de lien réseau, contraintes de matériel. Ce qui aide à juger l'utilité et le coût de la fonctionnalité.
