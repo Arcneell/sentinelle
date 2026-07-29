@@ -14,7 +14,7 @@
   <a href="https://github.com/Arcneell/sentinelle/releases"><img src="https://img.shields.io/github/v/release/Arcneell/sentinelle?color=ff7a18&label=release" alt="Release"/></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-3776ab.svg" alt="Python 3.11+"/>
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-informational.svg" alt="Platforms"/>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License MIT"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License: AGPL-3.0"/></a>
 </p>
 
 ---
@@ -43,14 +43,14 @@ large grids stay usable even over slow 4G links.
 Choose per workstation at first launch. The mode is then locked — switching it, or the
 server address, requires an admin account to sign in on that workstation.
 
-|                         | **Standalone** (default)          | **Central server**                              |
-| ----------------------- | --------------------------------- | ----------------------------------------------- |
-| Extra infrastructure    | none                              | one Docker host (VM / NAS / mini-PC)            |
-| Configuration           | local to each workstation         | centralised — add a camera once, everyone sees it |
-| DVR credentials         | on each workstation               | **never leave the server** (clients get a token) |
-| Access control          | —                                 | per-user sites/cameras, enforced server-side *and* at the relay |
-| Bandwidth to sites      | one pull per viewer               | **one pull per camera**, only while watched (key for 4G) |
-| Admin                   | —                                 | in-app Administration panel (users, cameras, loops) |
+|                      | **Standalone** (default)  | **Central server**                                              |
+| -------------------- | ------------------------- | --------------------------------------------------------------- |
+| Extra infrastructure | none                      | one Docker host (VM / NAS / mini-PC)                            |
+| Configuration        | local to each workstation | centralised — add a camera once, everyone sees it                |
+| DVR credentials      | on each workstation       | **never leave the server** (clients get a token)                |
+| Access control       | —                         | per-user sites/cameras, enforced server-side *and* at the relay  |
+| Bandwidth to sites   | one pull per viewer       | **one pull per camera**, only while watched (key for 4G)         |
+| Admin                | —                         | in-app Administration panel (users, cameras, loops)              |
 
 See [Server](#central-server) below for deployment.
 
@@ -306,4 +306,31 @@ affects the others.
 
 ## License
 
-Released under the [MIT License](LICENSE).
+Copyright (C) 2026 Arcneell. Sentinelle is free software, licensed under the
+**[GNU Affero General Public License v3.0 or later](LICENSE)**.
+
+Use it — including inside a company, on as many walls as you like — study it,
+modify it, redistribute it, build on top of it. No fee, no seat count, no
+expiry.
+
+The AGPL asks one thing back: **share alike**. Anyone who distributes Sentinelle
+or a derivative, *or* who runs a modified version as a network service other
+people interact with ([§13](LICENSE) — the server here being exactly that), owes
+those users the complete corresponding source under the same terms. So the
+project cannot be closed, absorbed into a proprietary product, or resold as a
+black box.
+
+Two consequences worth stating plainly:
+
+- **Releases up to 2.5.0 were published under the MIT License** and stay MIT
+  forever — a fork of those tags is not bound by the AGPL. Only later versions
+  are.
+- The AGPL does not forbid charging money as such; it forbids keeping the source
+  closed. A paid service built on Sentinelle is allowed **only if it ships its
+  source** to its users.
+
+Contributions are welcome and are accepted under the AGPL-3.0-or-later, no CLA.
+
+Bundled and required third-party components keep their own licenses, all
+compatible with the AGPL: PySide6/Qt 6 (LGPLv3), libmpv (LGPLv2.1+), FastAPI,
+uvicorn and MediaMTX (MIT).

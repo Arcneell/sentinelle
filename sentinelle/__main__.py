@@ -3,6 +3,15 @@
 Sans argument, la configuration vit dans le profil utilisateur
 (%APPDATA%\\Sentinelle\\config.yaml) et se gère entièrement dans l'interface.
 Usage portable : --config .\\config.yaml à côté de l'exe.
+
+Sentinelle — visualiseur de vidéosurveillance multi-sites RTSP / ONVIF.
+Copyright (C) 2026 Arcneell
+
+Ce programme est un logiciel libre : vous pouvez le redistribuer et/ou le
+modifier selon les termes de la GNU Affero General Public License telle que
+publiée par la Free Software Foundation, soit la version 3, soit (à votre
+choix) toute version ultérieure. Il est distribué sans aucune garantie ; voir
+le fichier LICENSE ou <https://www.gnu.org/licenses/> pour les détails.
 """
 
 import argparse
