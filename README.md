@@ -46,6 +46,14 @@ sudo apt install ./sentinelle_<version>_amd64.deb
 
 `dpkg -i` ne résout pas les dépendances ; enchaîner avec `apt -f install` le cas échéant.
 
+Windows, avec le ZIP `Sentinelle-<version>-windows-portable.zip` joint à la même page :
+décompresser où l'on veut, double-cliquer sur `Sentinelle.bat`. Rien n'est installé, aucun
+droit administrateur n'est requis, et un `config.yaml` posé à côté du `.bat` est prioritaire
+— le dossier peut donc vivre sur une clé USB. Le paquet embarque sa propre copie de Python
+(distribution officielle python.org) et libmpv ; il ne dépose aucun exécutable inconnu sur
+le poste, ce qui évite les blocages des antivirus d'entreprise. En cas de démarrage raté,
+`Sentinelle (diagnostic).bat` garde la console ouverte avec le détail de l'erreur.
+
 Depuis les sources, avec Python 3.11+ et libmpv :
 
 ```bash
@@ -114,12 +122,21 @@ docker run --rm -v "${PWD}:/src" -w /src debian:13 bash packaging/build_deb.sh
 ```
 
 ```powershell
-# Exécutable Windows -> dist/Sentinelle/Sentinelle.exe
+# ZIP portable Windows -> dist/Sentinelle-<version>-windows-portable.zip
+pwsh packaging/build_portable.ps1
+
+# Exécutable Windows PyInstaller -> dist/Sentinelle/Sentinelle.exe
 pwsh packaging/build_windows.ps1
 ```
 
-Le script Windows signe le binaire si `$env:SENTINELLE_PFX` et `$env:SENTINELLE_PFX_PW` sont
-fournis. Sans signature, les protections de poste bloquent souvent le résultat.
+Le portable est la livraison Windows recommandée : il n'embarque aucun binaire propre au
+projet, seulement l'interpréteur signé par la Python Software Foundation, donc rien à faire
+signer. Le script télécharge Python et libmpv, élague les modules Qt inutilisés (~640 Mo
+ramenés à ~130 Mo) et vérifie le paquet obtenu par un test de fumée avant de compresser.
+
+L'exécutable PyInstaller reste disponible ; `build_windows.ps1` le signe si
+`$env:SENTINELLE_PFX` et `$env:SENTINELLE_PFX_PW` sont fournis. Non signé, les protections
+de poste le bloquent souvent — d'où le portable.
 
 ## Architecture
 
@@ -140,7 +157,7 @@ sentinelle_server/         Serveur (sans Qt)
 ├── relay.py               Orchestration MediaMTX
 └── motion.py              Mouvement côté serveur, bus d'événements
 deploy/                    docker-compose, Dockerfile, mediamtx.yml
-packaging/                 Construction du .deb, icônes
+packaging/                 Construction du .deb et du portable Windows, icônes
 ```
 
 L'ONVIF est implémenté directement sur SOAP/HTTP, sans `zeep`. La découverte utilise le
