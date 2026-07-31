@@ -95,12 +95,66 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  # Paquet Windows portable : un ZIP autonome, sans installation et sans binaire
+  # à signer (l'interpréteur embarqué est celui de python.org, signé par la PSF).
+  # Construit sur Windows et non sur Linux, pour que le test de fumée exerce le
+  # paquet réel — chargement de libmpv-2.dll, greffon Qt « windows », chemin
+  # ._pth — plutôt qu'une simple arborescence de fichiers.
+  portable-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          # Sert uniquement à faire tourner pip (les roues sont téléchargées
+          # pour la version embarquée via --python-version, pas pour celle-ci).
+          python-version: "3.13"
+
+      - name: Construire le paquet portable
+        env:
+          # Évite la limite de 60 requêtes/heure de l'API GitHub anonyme lors de
+          # la résolution du build libmpv.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pwsh packaging/build_portable.ps1
+
+      # Le script échoue déjà si son test de fumée échoue ; on vérifie ici ce
+      # qu'il ne peut pas vérifier lui-même : qu'aucun exécutable étranger ne
+      # part dans le ZIP. Tout .exe autre que ceux de python.org devrait être
+      # signé, sinon les protections de poste bloqueront le paquet.
+      - name: Aucun exécutable non signé dans le paquet
+        shell: pwsh
+        run: |
+          $root = Get-ChildItem build/portable -Directory |
+                  Where-Object Name -like "Sentinelle-*" | Select-Object -First 1
+          $exes = Get-ChildItem -Recurse -File $root.FullName -Include *.exe
+          $etrangers = $exes | Where-Object { $_.Directory.Name -ne "python" }
+          if ($etrangers) {
+              $etrangers | ForEach-Object { Write-Error "Exécutable inattendu : $($_.FullName)" }
+              exit 1
+          }
+          foreach ($exe in $exes) {
+              $sig = Get-AuthenticodeSignature $exe.FullName
+              if ($sig.Status -ne "Valid") {
+                  throw "Signature invalide sur $($exe.Name) : $($sig.Status)"
+              }
+              Write-Host "$($exe.Name) signé par $($sig.SignerCertificate.Subject)"
+          }
+
+      - name: Publier le portable comme artefact du run
+        uses: actions/upload-artifact@v7
+        with:
+          name: sentinelle-windows-portable
+          path: dist/*-windows-portable.zip
+          if-no-files-found: error
+          retention-days: 90
+
   # Agrégateur : c'est LE check requis par la protection de branche (contexte
   # « test », aussi attendu par l'auto-merge Dependabot). Il n'est vert que si
   # toute la matrice l'est ; `if: always()` l'empêche d'être « skipped » quand
   # la matrice échoue (un check requis sauté passerait pour réussi).
   test:
-    needs: [tests, deb]
+    needs: [tests, deb, portable-windows]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -108,3 +162,4 @@ jobs:
         run: |
           test "${{ needs.tests.result }}" = "success"
           test "${{ needs.deb.result }}" = "success"
+          test "${{ needs.portable-windows.result }}" = "success"
