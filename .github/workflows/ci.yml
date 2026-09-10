@@ -95,6 +95,41 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  # Paquet Fedora : même logique que le .deb — construit sur la plus ancienne
+  # Fedora visée, installé avec ses seuls Requires (sans dépendances faibles),
+  # et la pile vidéo doit venir du système, jamais du bundle.
+  rpm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Construire le .rpm (Fedora 42)
+        run: |
+          mkdir -p dist
+          docker run --rm -v "$PWD:/src" -w /src fedora:42 bash packaging/build_rpm.sh
+
+      - name: Installer et fumer (Requires seuls, sans Recommends)
+        run: |
+          docker run --rm -v "$PWD/dist:/dist" fedora:42 bash -ec '
+            set -o pipefail
+            dnf install -y --setopt=install_weak_deps=False /dist/*.rpm
+            XCB=$(find /opt/sentinelle -name libqxcb.so | head -1)
+            test -n "$XCB"
+            ldd "$XCB" | (! grep "not found")
+            test -z "$(find /opt/sentinelle -name "libmpv.so*" -o -name "libva.so*" -o -name "libavcodec.so*")"
+            test -e /usr/lib64/libmpv.so.2
+            /opt/sentinelle/sentinelle --help
+            timeout 15 env QT_QPA_PLATFORM=offscreen /opt/sentinelle/sentinelle || test $? -eq 124
+          '
+
+      - name: Publier le .rpm comme artefact du run
+        uses: actions/upload-artifact@v7
+        with:
+          name: sentinelle-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+          retention-days: 90
+
   # Paquet Windows portable : un ZIP autonome, sans installation et sans binaire
   # à signer (l'interpréteur embarqué est celui de python.org, signé par la PSF).
   # Construit sur Windows et non sur Linux, pour que le test de fumée exerce le
@@ -154,7 +189,7 @@ jobs:
   # toute la matrice l'est ; `if: always()` l'empêche d'être « skipped » quand
   # la matrice échoue (un check requis sauté passerait pour réussi).
   test:
-    needs: [tests, deb, portable-windows]
+    needs: [tests, deb, rpm, portable-windows]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -162,4 +197,5 @@ jobs:
         run: |
           test "${{ needs.tests.result }}" = "success"
           test "${{ needs.deb.result }}" = "success"
+          test "${{ needs.rpm.result }}" = "success"
           test "${{ needs.portable-windows.result }}" = "success"

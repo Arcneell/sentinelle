@@ -850,7 +850,9 @@ class VideoTile(QFrame):
             self._hwdec_signale = True
             logger.warning(
                 f"[{self.camera.id}] décodage LOGICIEL (VA-API indisponible ?) — "
-                "charge CPU élevée ; vérifier le paquet va-driver-all")
+                "charge CPU élevée ; vérifier le pilote VA-API (Debian : "
+                "va-driver-all ; Fedora : intel-media-driver ou "
+                "mesa-va-drivers-freeworld depuis RPM Fusion)")
 
     def _on_mpv_log(self, level, component, message):
         # appelé depuis le thread mpv — deque est thread-safe pour append
