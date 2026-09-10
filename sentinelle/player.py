@@ -29,6 +29,9 @@ try:
     mpv = _mpv
 except Exception as e:
     MPV_IMPORT_ERROR = str(e)
+    import logging
+    logging.getLogger(__name__).error(
+        "libmpv inchargeable, aucune vidéo possible : %s", MPV_IMPORT_ERROR)
 
 
 def mpv_disponible() -> bool:

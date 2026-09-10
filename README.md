@@ -46,6 +46,20 @@ sudo apt install ./sentinelle_<version>_amd64.deb
 
 `dpkg -i` ne résout pas les dépendances ; enchaîner avec `apt -f install` le cas échéant.
 
+Fedora 42+, avec le `.rpm` joint à la même page :
+
+```bash
+sudo dnf install ./sentinelle-<version>-1.x86_64.rpm
+```
+
+Deux paquets [RPM Fusion](https://rpmfusion.org/Configuration) sont indispensables sur
+Fedora : `libavcodec-freeworld`, car le `ffmpeg-free` des dépôts de base n'a aucun décodeur
+H264 ni HEVC (toutes les tuiles restent en « erreur de lecture » sans lui), et un pilote
+VA-API complet, `intel-media-driver` (Intel) ou `mesa-va-drivers-freeworld` (AMD), sans
+lequel mpv décode en logiciel et une grille de 16 flux ne tient pas sur un mini-PC. Sur les
+variantes Atomic (Silverblue, Budgie Atomic…) : `rpm-ostree install libavcodec-freeworld
+intel-media-driver` puis redémarrage.
+
 Windows, avec le ZIP `Sentinelle-<version>-windows-portable.zip` joint à la même page :
 décompresser où l'on veut, double-cliquer sur `Sentinelle.bat`. Rien n'est installé, aucun
 droit administrateur n'est requis, et un `config.yaml` posé à côté du `.bat` est prioritaire
@@ -119,6 +133,9 @@ Déploiement détaillé, TLS, modèle de sécurité et lecture des flux par un s
 ```bash
 # .deb Debian 13, y compris depuis Windows -> dist/sentinelle_<version>_amd64.deb
 docker run --rm -v "${PWD}:/src" -w /src debian:13 bash packaging/build_deb.sh
+
+# .rpm Fedora 42+ -> dist/sentinelle-<version>-1.x86_64.rpm
+docker run --rm -v "${PWD}:/src" -w /src fedora:42 bash packaging/build_rpm.sh
 ```
 
 ```powershell
@@ -157,7 +174,7 @@ sentinelle_server/         Serveur (sans Qt)
 ├── relay.py               Orchestration MediaMTX
 └── motion.py              Mouvement côté serveur, bus d'événements
 deploy/                    docker-compose, Dockerfile, mediamtx.yml
-packaging/                 Construction du .deb et du portable Windows, icônes
+packaging/                 Construction du .deb, du .rpm et du portable Windows, icônes
 ```
 
 L'ONVIF est implémenté directement sur SOAP/HTTP, sans `zeep`. La découverte utilise le

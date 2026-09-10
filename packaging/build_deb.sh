@@ -59,6 +59,15 @@ for lib in libmpv libva libavcodec; do
     fi
 done
 
+# libxkbcommon.so.0 ne doit PAS être embarquée : le plugin Qt xcb charge
+# libxkbcommon-x11 du SYSTÈME (Requires), qui appelle des symboles privés de
+# libxkbcommon et exige la même version. Avec la libxkbcommon du conteneur de
+# build à sa place (LD_LIBRARY_PATH du bootloader), segfault dans
+# xkb_keymap_key_get_syms_by_level à la création de QApplication (constaté
+# Fedora 44 : conteneur libxkbcommon 1.8, système 1.13). On la retire, le
+# système fournit la sienne.
+rm -f /tmp/dist/sentinelle/_internal/libxkbcommon.so.0
+
 # --- arborescence du paquet ---
 ROOT=/tmp/${PKG}
 rm -rf "$ROOT"
@@ -85,7 +94,7 @@ Version: ${VERSION}
 Section: video
 Priority: optional
 Architecture: ${ARCH}
-Depends: libmpv2 (>= 0.34), libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render-util0, libxcb-shape0, libxcb-xkb1, libxkbcommon-x11-0, va-driver-all
+Depends: libmpv2 (>= 0.34), libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render-util0, libxcb-shape0, libxcb-xkb1, libxkbcommon0, libxkbcommon-x11-0, va-driver-all
 Recommends: ffmpeg
 Maintainer: Sentinelle <sentinelle@example.com>
 Description: Visionneuse de videosurveillance multi-sites (RTSP, ONVIF)

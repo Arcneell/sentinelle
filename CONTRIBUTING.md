@@ -43,8 +43,8 @@ Les tests d'interface construisent de vraies fenêtres Qt en mode hors-écran
 (`QT_QPA_PLATFORM=offscreen`) et ne vérifient pas le rendu. Ceux du serveur passent par
 `TestClient`, sans Docker ni MediaMTX.
 
-La CI rejoue la suite sur Python 3.11, 3.12 et 3.14, puis construit le `.deb` et vérifie
-qu'il s'installe et démarre avec ses seules dépendances strictes.
+La CI rejoue la suite sur Python 3.11, 3.12 et 3.14, puis construit le `.deb` et le `.rpm`
+et vérifie que chacun s'installe et démarre avec ses seules dépendances strictes.
 
 Une correction de bogue vient avec le test qui échouait avant elle.
 

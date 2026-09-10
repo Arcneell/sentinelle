@@ -74,10 +74,22 @@ def _forcer_xcb_si_wayland():
     en Wayland natif cela ne fonctionne pas (tuiles noires). On demande donc
     xcb en premier, avec repli sur wayland si le plugin xcb ne peut pas se
     charger (liste « xcb;wayland » : l'application démarre dans tous les cas).
-    Sans effet si l'utilisateur a fixé lui-même QT_QPA_PLATFORM."""
-    if (sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY")
-            and not os.environ.get("QT_QPA_PLATFORM")):
-        os.environ["QT_QPA_PLATFORM"] = "xcb;wayland"
+
+    Certains bureaux exportent QT_QPA_PLATFORM=wayland pour TOUTE la session
+    (Budgie 10.10 via startbudgielabwc, par exemple) : ce n'est pas un choix
+    de l'utilisateur pour Sentinelle, on le remplace aussi. Toute autre valeur
+    explicite (xcb, offscreen, eglfs…) est respectée."""
+    if not (sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY")):
+        return
+    actuel = os.environ.get("QT_QPA_PLATFORM", "")
+    if actuel and not actuel.lower().startswith("wayland"):
+        return
+    os.environ["QT_QPA_PLATFORM"] = "xcb;wayland"
+    if actuel:
+        logger.info("Session Wayland détectée : QT_QPA_PLATFORM=%s hérité de la "
+                    "session remplacé par xcb;wayland (XWayland) pour l'affichage "
+                    "vidéo, repli wayland si indisponible.", actuel)
+    else:
         logger.info("Session Wayland détectée : Qt demandé en xcb (XWayland) "
                     "pour l'affichage vidéo, repli wayland si indisponible.")
 
@@ -162,14 +174,21 @@ def main() -> int:
     # le dit UNE fois, clairement, au lieu de laisser un mur noir mystérieux.
     if (sys.platform.startswith("linux")
             and app.platformName().lower().startswith("wayland")):
+        if os.environ.get("DISPLAY"):
+            cause = ("le plugin Qt xcb n'a pas pu se charger : une bibliothèque "
+                     "xcb manque (libxcb-cursor0 / xcb-util-cursor, installée "
+                     "automatiquement par les paquets .deb et .rpm)")
+        else:
+            cause = ("aucun serveur X (DISPLAY vide) : XWayland est absent ou "
+                     "désactivé dans la session")
         logger.error("Qt tourne en Wayland natif : l'affichage vidéo intégré "
-                     "(mpv/wid X11) est indisponible. Vérifier que XWayland est "
-                     "actif et que libxcb-cursor0 est installée.")
+                     "(mpv/wid X11) est indisponible. Cause probable : %s. "
+                     "QT_QPA_PLATFORM=%s", cause, os.environ.get("QT_QPA_PLATFORM"))
         QMessageBox.warning(
             None, "Sentinelle",
             "L'affichage vidéo est indisponible en Wayland natif.\n\n"
-            "Vérifiez que XWayland est actif et que le paquet libxcb-cursor0\n"
-            "est installé (automatique via le paquet .deb), puis relancez.")
+            f"Cause probable : {cause}.\n\n"
+            "Corrigez puis relancez. Détails dans le journal (--verbose).")
 
     from .ui.theme import apply_theme
     apply_theme(app)          # thème mémorisé (sombre par défaut)
